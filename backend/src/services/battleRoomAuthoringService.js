@@ -1,0 +1,498 @@
+/**
+ * battleRoomAuthoringService.js
+ * ------------------------------------------------------------------
+ * Orchestrates the production-ready problem authoring pipeline for battle
+ * room questions:
+ *
+ *   1. Normalize a question payload (structured signature + parameter-based
+ *      test cases, or the legacy raw signature + raw input format).
+ *   2. Convert parameter-based test-case values into the canonical judge
+ *      input string (one JSON line per parameter).
+ *   3. Generate starter code for every supported language from one
+ *      structured signature
+ *   4. Generate judge wrappers for every language
+ *   5. Generate expected outputs via the reference solution
+ *   6. Validate a question before publishing (detailed errors)
+ *
+ * Important: Starter code is NEVER saved to the database. It is generated
+ * fresh each time the question is loaded. Only the structured signature
+ * metadata is persisted.
+ */
+
+import { parseSignature, validateSignature, getStoredSignature } from "./signatureParser.js";
+import {
+  validateStructuredSignature,
+  generateSignaturePreviews,
+} from "./structuredSignature.js";
+import {
+  convertParameterValuesToInput,
+  validateParameterTestCases,
+  parseInputToParameterValues,
+} from "./parameterConverter.js";
+import { composeStarterFile, AUTHORING_LANGUAGES } from "./languageTemplates.js";
+import { composeProgram } from "./wrapperGenerator.js";
+import { generateExpectedOutputs } from "./referenceSolutionService.js";
+
+export const PROBLEM_TYPES = [
+  "array",
+  "string",
+  "linked-list",
+  "tree",
+  "graph",
+  "matrix",
+  "dynamic-programming",
+  "greedy",
+  "stack",
+  "queue",
+  "binary-search",
+  "math",
+  "bit-manipulation",
+  "custom",
+];
+
+export const SUPPORTED_JUDGE_LANGUAGES = AUTHORING_LANGUAGES.map((l) => l.id);
+
+export const CATEGORY_VALUES = [
+  "Array", "String", "Matrix", "Linked List", "Binary Tree", "Graph",
+  "Stack", "Queue", "Heap", "HashMap", "Sorting", "Searching",
+  "Dynamic Programming", "Greedy", "Backtracking", "Bit Manipulation", "Math", "Custom",
+];
+
+export const TAG_SUGGESTIONS = [
+  "array", "hash-map", "two-pointers", "sorting", "stack", "queue", "sliding-window",
+  "binary-search", "recursion", "linked-list", "tree", "graph", "dfs", "bfs",
+  "dynamic-programming", "greedy", "backtracking", "bit-manipulation", "math",
+  "string", "matrix", "prefix-sum", "heap", "memoization", "topological-sort",
+];
+
+/**
+ * Split a raw bulk editor textarea into individual test-case blocks.
+ */
+export function splitBulkTestCases(raw) {
+  if (!raw || typeof raw !== "string") return [];
+  const blocks = raw
+    .split(/\r?\n---\s*\r?\n|\r?\n---\r?\n?|^---\s*$/m)
+    .map((b) => b.trim())
+    .filter((b) => b !== "");
+  return blocks;
+}
+
+/**
+ * Deduplicate test cases (by input string, and by input+expected).
+ */
+export function deduplicateTestCases(testCases) {
+  const seenInputs = new Set();
+  const seenFull = new Set();
+  const unique = [];
+  for (const tc of testCases) {
+    if (!tc || tc.input === undefined || tc.input === null || String(tc.input).trim() === "") continue;
+    const inputKey = String(tc.input).trim();
+    const fullKey = inputKey + "|||" + String(tc.expectedOutput ?? "").trim();
+    if (seenFull.has(fullKey)) continue;
+    seenInputs.add(inputKey);
+    seenFull.add(fullKey);
+    unique.push(tc);
+  }
+  return unique;
+}
+
+function normalizeExamples(examples) {
+  if (!Array.isArray(examples)) return [];
+  return examples
+    .filter((ex) => ex && (ex.input || ex.input === "") && (ex.output || ex.output === ""))
+    .map((ex) => ({
+      input: String(ex.input || ""),
+      output: String(ex.output || ""),
+      explanation: String(ex.explanation || ""),
+    }));
+}
+
+function normalizeTags(tags) {
+  if (!Array.isArray(tags)) return [];
+  return tags.map((t) => String(t).trim()).filter((t) => t !== "");
+}
+
+function normalizeHints(hints) {
+  if (!Array.isArray(hints)) return [];
+  return hints.map((h) => String(h).trim()).filter((h) => h !== "");
+}
+
+/**
+ * Build the canonical signature for a question.
+ *
+ * Priority:
+ *   1. Structured signature input ({ name, returnType, parameters })
+ *      (the new parameter-based workflow).
+ *   2. Stored structured signature (q.signature) — legacy + edit flow.
+ *   3. Raw signature string (q.functionSignature) — legacy fallback.
+ *
+ * @returns {{ signature: Object|null, functionSignature: string, functionName: string }}
+ */
+export function resolveQuestionSignature(q) {
+  const structuredInput = {
+    name: q.functionName || q.name,
+    returnType: q.returnType,
+    parameters: q.parameters || q.params,
+  };
+
+  // 1. New structured workflow.
+  if (structuredInput.parameters || (structuredInput.name && structuredInput.returnType)) {
+    const sigResult = validateStructuredSignature(structuredInput);
+    if (sigResult.valid && sigResult.signature) {
+      return {
+        signature: sigResult.signature,
+        functionSignature: "",
+        functionName: sigResult.signature.name,
+        signaturePreview: generateSignaturePreviews(sigResult.signature),
+        signatureErrors: [],
+      };
+    }
+    // If the author explicitly used the builder but it is invalid, surface
+    // the structured errors (do not silently fall back to raw parsing).
+    if (Array.isArray(q.parameters) && q.parameters.length > 0) {
+      return {
+        signature: null,
+        functionSignature: "",
+        functionName: (q.functionName || "").trim(),
+        signaturePreview: null,
+        signatureErrors: sigResult.errors,
+      };
+    }
+  }
+
+  // 2. Stored structured signature.
+  if (q.signature && q.signature.name) {
+    const sig = getStoredSignature(q.signature);
+    if (sig) {
+      return {
+        signature: sig,
+        functionSignature: (q.functionSignature || "").trim(),
+        functionName: sig.name,
+        signaturePreview: generateSignaturePreviews(sig),
+        signatureErrors: [],
+      };
+    }
+  }
+
+  // 3. Legacy raw signature string.
+  const raw = (q.functionSignature || "").trim();
+  if (raw) {
+    const sigResult = validateSignature(raw);
+    if (sigResult.valid) {
+      return {
+        signature: sigResult.parsed,
+        functionSignature: raw,
+        functionName: sigResult.parsed.name,
+        signaturePreview: generateSignaturePreviews(sigResult.parsed),
+        signatureErrors: [],
+      };
+    }
+    return {
+      signature: null,
+      functionSignature: raw,
+      functionName: (q.functionName || "").trim(),
+      signaturePreview: null,
+      signatureErrors: [sigResult.error],
+    };
+  }
+
+  return {
+    signature: null,
+    functionSignature: "",
+    functionName: (q.functionName || "").trim(),
+    signaturePreview: null,
+    signatureErrors: [],
+  };
+}
+
+/**
+ * Normalize test cases. When a signature is available and test cases provide
+ * `parameterValues`, convert them to the canonical judge input string. Legacy
+ * raw `input` strings are preserved unchanged.
+ */
+export function normalizeTestCases(rawTestCases, signature) {
+  if (!Array.isArray(rawTestCases)) return [];
+  const out = [];
+  for (const tc of rawTestCases) {
+    if (!tc) continue;
+const hasParameterValues = tc.parameterValues && typeof tc.parameterValues === "object";
+    if (hasParameterValues && signature && signature.name) {
+      const input = convertParameterValuesToInput(signature, tc.parameterValues);
+      out.push({
+        input,
+        expectedOutput: String(tc.expectedOutput ?? ""),
+        description: tc.description || "",
+        parameterValues: tc.parameterValues,
+      });
+    } else {
+      out.push({
+        input: String(tc.input ?? ""),
+        expectedOutput: String(tc.expectedOutput ?? ""),
+        description: tc.description || "",
+        parameterValues: tc.parameterValues || undefined,
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Build a question object from the authoring form.
+ * Stores structured signature metadata (never generated code).
+ */
+export function normalizeQuestion(rawQuestion) {
+  const q = rawQuestion || {};
+  const resolved = resolveQuestionSignature(q);
+
+  const normalized = {
+    title: (q.title || "").trim(),
+    description: (q.description || "").trim(),
+    explanation: (q.explanation || "").trim(),
+    constraints: (q.constraints || "").trim(),
+    difficulty: q.difficulty || "MEDIUM",
+    points: q.points || 100,
+    problemType: q.problemType || "array",
+    category: CATEGORY_VALUES.includes(q.category) ? q.category : "Custom",
+    tags: normalizeTags(q.tags),
+    examples: normalizeExamples(q.examples),
+    hints: normalizeHints(q.hints),
+    functionSignature: resolved.functionSignature,
+    functionName: resolved.functionName,
+    signature: resolved.signature,
+    signaturePreview: resolved.signaturePreview,
+    signatureErrors: resolved.signatureErrors,
+  };
+
+  // New structured workflow — if the builder was used, require a valid
+  // structured signature so the UI can never emit an invalid one.
+  if (resolved.signature) {
+    normalized.returnType = resolved.signature.returnType;
+    normalized.parameters = resolved.signature.params.map((p) => ({ name: p.name, type: p.type }));
+  }
+
+  // Bulk inputs -> test cases (legacy flow).
+  const visibleBulk = splitBulkTestCases(q.bulkVisibleTestCases || q.visibleBulkInputs || "");
+  const hiddenBulk = splitBulkTestCases(q.bulkHiddenTestCases || q.hiddenBulkInputs || "");
+
+  // Test cases: parameter-based first, else legacy raw inputs.
+  let visibleSource = Array.isArray(q.visibleTestCases) && q.visibleTestCases.length > 0
+    ? q.visibleTestCases
+    : visibleBulk.map((input) => ({ input, expectedOutput: "", description: "" }));
+
+  let hiddenSource = Array.isArray(q.hiddenTestCases) && q.hiddenTestCases.length > 0
+    ? q.hiddenTestCases
+    : hiddenBulk.map((input) => ({ input, expectedOutput: "" }));
+
+  let visibleTestCases = normalizeTestCases(visibleSource, resolved.signature);
+  let hiddenTestCases = normalizeTestCases(hiddenSource, resolved.signature);
+
+  visibleTestCases = deduplicateTestCases(visibleTestCases);
+  hiddenTestCases = deduplicateTestCases(hiddenTestCases);
+
+  normalized.visibleTestCases = visibleTestCases;
+  normalized.hiddenTestCases = hiddenTestCases;
+
+  normalized.referenceSolution = q.referenceSolution || "";
+  normalized.referenceSolutionLanguage = q.referenceSolutionLanguage || "python";
+  normalized.expectedOutputSource = q.expectedOutputSource || "reference";
+
+  // Starter code: NEVER persist generated code. Generate fresh on load.
+  normalized.starterCodeByLanguage = {};
+
+  // Wrappers: if explicit provided, keep them; else generated on demand.
+  const explicitWrappers = q.wrapperByLanguage && Object.keys(q.wrapperByLanguage).length > 0
+    ? q.wrapperByLanguage
+    : {};
+  normalized.wrapperByLanguage = explicitWrappers;
+
+  return normalized;
+}
+
+/**
+ * Generate starter code for all supported languages from the question's
+ * signature. Returns { languageId: starterFile }.
+ * NEVER saves to DB — always fresh generation.
+ */
+export function generateStarterCodeForAllLanguages(question, languages = SUPPORTED_JUDGE_LANGUAGES) {
+  if (!question.signature || !question.signature.name) {
+    throw new Error("A valid function signature is required before generating starter code.");
+  }
+  const selectedLanguages = Array.isArray(languages) && languages.length > 0 ? languages : SUPPORTED_JUDGE_LANGUAGES;
+  const result = {};
+  for (const lang of selectedLanguages) {
+    if (!SUPPORTED_JUDGE_LANGUAGES.includes(lang)) continue;
+    result[lang] = composeStarterFile(question.signature, lang);
+  }
+  return result;
+}
+
+export function generateStarterCodeForLanguages(question, languages = SUPPORTED_JUDGE_LANGUAGES) {
+  return generateStarterCodeForAllLanguages(question, languages);
+}
+
+/**
+ * Generate judge wrappers for all supported languages.
+ * Returns { languageId: wrapperSnippet }.
+ */
+export function generateWrappersForAllLanguages(question) {
+  if (!question.signature || !question.signature.name) {
+    throw new Error("A valid function signature is required before generating wrappers.");
+  }
+  const result = {};
+  for (const lang of SUPPORTED_JUDGE_LANGUAGES) {
+    result[lang] = composeProgram(question, "// participant code inserted here", lang);
+  }
+  return result;
+}
+
+/**
+ * Generate expected outputs for all visible + hidden test cases using the
+ * reference solution. Mutates and returns the question object.
+ * On failure the reference solution service throws with the message:
+ * "Reference solution failed. Fix the solution before publishing."
+ */
+export async function generateExpectedOutputsForQuestion(question) {
+  if (!question.referenceSolution || !question.referenceSolution.trim()) {
+    throw new Error("A reference solution is required to auto-generate expected outputs.");
+  }
+  if (!question.signature || !question.signature.name) {
+    throw new Error("A valid function signature is required before generating expected outputs.");
+  }
+  const lang = question.referenceSolutionLanguage || "python";
+  if (!SUPPORTED_JUDGE_LANGUAGES.includes(lang)) {
+    throw new Error("Unsupported reference solution language: " + lang);
+  }
+
+  const visible = await generateExpectedOutputs(
+    question,
+    question.referenceSolution,
+    lang,
+    question.visibleTestCases
+  );
+  const hidden = await generateExpectedOutputs(
+    question,
+    question.referenceSolution,
+    lang,
+    question.hiddenTestCases
+  );
+
+  question.visibleTestCases = visible;
+  question.hiddenTestCases = hidden;
+  question.expectedOutputSource = "reference";
+  return question;
+}
+
+/**
+ * Validate a question before publishing. Returns detailed errors array.
+ */
+export function validateQuestion(question) {
+  const errors = [];
+  if (!question.title) errors.push("Question title is required.");
+  if (!question.description) errors.push("Question description is required.");
+  if (!question.constraints) errors.push("Constraints are required.");
+  if (!["EASY", "MEDIUM", "HARD"].includes(question.difficulty)) {
+    errors.push("Difficulty must be EASY, MEDIUM, or HARD.");
+  }
+
+  if (!question.signature || !question.signature.name) {
+    if (Array.isArray(question.signatureErrors) && question.signatureErrors.length > 0) {
+      errors.push(...question.signatureErrors);
+    } else if (!question.functionSignature) {
+      errors.push("A function is required. Provide the function name, return type, and parameters.");
+    } else {
+      errors.push("Function signature is invalid — include the function name and parameters.");
+    }
+  } else {
+    const sig = question.signature;
+    if (!sig.name) errors.push("Function name is required.");
+    else if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(sig.name)) {
+      errors.push("Function name is not a valid identifier.");
+    }
+    if (!sig.returnType) errors.push("Return type is required.");
+    const names = (sig.params || []).map((p) => String(p.name || "").toLowerCase());
+    if (new Set(names).size !== names.length) {
+      errors.push("Parameter names must be unique.");
+    }
+    for (const p of sig.params || []) {
+      if (!p.name || !String(p.name).trim()) {
+        errors.push("Every parameter must have a name.");
+        break;
+      }
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(p.name).trim())) {
+        errors.push("Parameter name \"" + p.name + "\" is not a valid identifier.");
+      }
+      if (!p.type || !String(p.type).trim()) {
+        errors.push("Parameter \"" + p.name + "\" is missing a type.");
+      }
+    }
+  }
+
+  // Parameter-based test cases: validate the parameter values are complete
+  // and well-formed for the declared signature.
+  if (question.signature && question.signature.name) {
+    const visibleParamErrors = validateParameterTestCases(question.signature, question.visibleTestCases);
+    const hiddenParamErrors = validateParameterTestCases(question.signature, question.hiddenTestCases);
+    errors.push(...visibleParamErrors, ...hiddenParamErrors);
+  }
+
+  if (!question.visibleTestCases || question.visibleTestCases.length === 0) {
+    errors.push("At least one visible example/test case is required.");
+  } else {
+    const withMissingInput = question.visibleTestCases.filter((tc) => !tc.input || String(tc.input).trim() === "" || Object.keys(tc.parameterValues || {}).length === 0);
+    if (withMissingInput.length > 0) errors.push("Some visible test cases are missing parameter values.");
+  }
+  if (!question.hiddenTestCases || question.hiddenTestCases.length === 0) {
+    errors.push("At least one hidden test case is required.");
+  } else {
+    const withMissingInput = question.hiddenTestCases.filter((tc) => !tc.input || String(tc.input).trim() === "" || Object.keys(tc.parameterValues || {}).length === 0);
+    if (withMissingInput.length > 0) errors.push("Some hidden test cases are missing parameter values.");
+  }
+
+  const missing = [
+    ...(question.visibleTestCases || []),
+    ...(question.hiddenTestCases || []),
+  ].filter((tc) => tc.expectedOutput === undefined || tc.expectedOutput === null || String(tc.expectedOutput).trim() === "");
+  if (missing.length > 0) {
+    errors.push("Expected outputs are missing for " + missing.length + " test case(s). Re-run reference solution generation.");
+  }
+
+  const allInputs = [
+    ...(question.visibleTestCases || []),
+    ...(question.hiddenTestCases || []),
+  ].map((tc) => String(tc.input || "").trim());
+  const uniqueInputs = new Set(allInputs);
+  if (uniqueInputs.size !== allInputs.length) {
+    errors.push("Duplicate test case inputs detected. Remove duplicates before publishing.");
+  }
+
+  if (question.referenceSolution && !question.referenceSolution.trim()) {
+    errors.push("Reference solution is empty.");
+  }
+  if (!question.referenceSolution || !question.referenceSolution.trim()) {
+    errors.push("A reference solution is required. The platform generates expected outputs from it.");
+  }
+  if (!["java", "python", "cpp", "c"].includes(question.referenceSolutionLanguage || "python")) {
+    errors.push("Reference solution language must be java, python, c++, or c.");
+  }
+
+  return errors;
+}
+
+export default {
+  PROBLEM_TYPES,
+  CATEGORY_VALUES,
+  TAG_SUGGESTIONS,
+  SUPPORTED_JUDGE_LANGUAGES,
+  splitBulkTestCases,
+  deduplicateTestCases,
+  resolveQuestionSignature,
+  normalizeTestCases,
+  normalizeQuestion,
+  generateStarterCodeForAllLanguages,
+  generateWrappersForAllLanguages,
+  generateExpectedOutputsForQuestion,
+  validateQuestion,
+  generateStarterCodeForLanguages,
+  parseInputToParameterValues,
+};
+

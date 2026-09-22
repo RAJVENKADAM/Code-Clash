@@ -1,0 +1,71 @@
+import dotenv from "dotenv";
+
+dotenv.config();
+
+const requiredVars = ["MONGODB_URI", "JWT_SECRET", "JWT_REFRESH_SECRET"];
+
+const optionalVars = {
+  PORT: "5000",
+  NODE_ENV: "development",
+  CLIENT_URL: "http://localhost:5173",
+  EMAIL_HOST: "smtp.ethereal.email",
+  EMAIL_PORT: "587",
+  EMAIL_USER: "",
+  EMAIL_PASS: "",
+  EMAIL_FROM_NAME: "Coding Challenge Platform",
+  SECURE_CODE_ENGINE_URL:
+    "https://secure-code-engine.onrender.com/api/v1/execute",
+  SECURE_CODE_ENGINE_TIMEOUT_MS: "10000",
+  RATE_LIMIT_WINDOW_MS: "900000",
+  RATE_LIMIT_MAX: "300",
+  OTP_EXPIRY_MINUTES: "5",
+  OTP_TTL_SECONDS: "300",
+  OTP_MAX_ATTEMPTS: "3",
+  OTP_RESEND_COOLDOWN_SECONDS: "30",
+  JWT_EXPIRY: "15m",
+  JWT_REFRESH_EXPIRY: "7d",
+  JWT_ISSUER: "amux-ccp",
+  LOG_LEVEL: "dev",
+  SUPER_ADMIN_EMAIL: "helloamux@gmail.com",
+};
+
+function validateEnv() {
+  const missing = [];
+  for (const key of requiredVars) {
+    if (!process.env[key]) {
+      missing.push(key);
+    }
+  }
+
+  if (missing.length > 0) {
+    console.error(
+      `[Config] Missing required environment variables: ${missing.join(", ")}`,
+    );
+    if (process.env.NODE_ENV === "production") {
+      process.exit(1);
+    } else {
+      console.warn("[Config] Running in development mode with default values.");
+    }
+  }
+
+  const config = { ...process.env };
+  // Strip trailing semicolons / whitespace from all config values. Semicolons
+  // are frequently appended accidentally in .env files (e.g. "587;" or
+  // "development;") and break numeric/boolean parsing downstream.
+  for (const key of Object.keys(config)) {
+    if (typeof config[key] === "string") {
+      config[key] = config[key].replace(/;\s*$/, "").trim();
+    }
+  }
+  for (const [key, defaultValue] of Object.entries(optionalVars)) {
+    if (!config[key]) {
+      config[key] = defaultValue;
+    }
+  }
+
+  return config;
+}
+
+const config = validateEnv();
+
+export default config;

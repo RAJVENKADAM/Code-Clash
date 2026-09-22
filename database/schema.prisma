@@ -1,0 +1,108 @@
+// Prisma Schema for Coding Challenge Platform
+// Use with: npx prisma generate && npx prisma db push
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGODB_URI")
+}
+
+model User {
+  id                 String   @id @default(auto()) @map("_id") @db.ObjectId
+  email              String   @unique
+  name               String
+  organization       String
+  role               String   @default("USER")
+  otp                String?
+  otpExpiry          DateTime?
+  isVerified         Boolean  @default(false)
+  totalScore         Float    @default(0)
+  challengesCompleted Int     @default(0)
+  lastActiveDate     DateTime?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  submissions Submission[]
+  challenges  Challenge[]   @relation("CreatedChallenges")
+
+  @@index([email])
+  @@index([organization])
+  @@index([role])
+  @@index([totalScore])
+}
+
+model Challenge {
+  id               String   @id @default(auto()) @map("_id") @db.ObjectId
+  title            String
+  slug             String   @unique
+  description      String
+  difficulty       String   @default("MEDIUM")
+  examples         Json     @default("[]")
+  constraints      String   @default("")
+  starterCode      String   @default("function solution(input) { return input; }")
+  testCases        Json
+  activeDate       DateTime @default(now())
+  isActive         Boolean  @default(true)
+  createdById      String   @db.ObjectId
+  createdBy        User     @relation("CreatedChallenges", fields: [createdById], references: [id])
+  totalSubmissions Int      @default(0)
+  totalAccepted    Int      @default(0)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  submissions Submission[]
+
+  @@index([activeDate, isActive])
+  @@index([slug])
+}
+
+model Submission {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId         String   @db.ObjectId
+  user           User     @relation(fields: [userId], references: [id])
+  challengeId    String   @db.ObjectId
+  challenge      Challenge @relation(fields: [challengeId], references: [id])
+  code           String
+  language       String   @default("javascript")
+  status         String   @default("PENDING")
+  score          Float    @default(0)
+  passed         Int      @default(0)
+  failed         Int      @default(0)
+  total          Int      @default(0)
+  executionTime  Float    @default(0)
+  memoryUsed     Float    @default(0)
+  timeToSolve    Int      @default(0)
+  output         String   @default("")
+  error          String   @default("")
+  results        Json     @default("[]")
+  violationCount Int      @default(0)
+  isDisqualified Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, challengeId])
+  @@index([userId, createdAt])
+  @@index([challengeId, status])
+  @@index([score])
+}
+
+model Organization {
+  id             String   @id @default(auto()) @map("_id") @db.ObjectId
+  name           String   @unique
+  participants   Int      @default(0)
+  totalScore     Float    @default(0)
+  averageScore   Float    @default(0)
+  bayesianScore  Float    @default(0)
+  topKScore      Float    @default(0)
+  rank           Int      @default(0)
+  lastUpdated    DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([bayesianScore])
+  @@index([rank])
+}
+
