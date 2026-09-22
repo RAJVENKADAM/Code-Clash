@@ -165,20 +165,17 @@ export class ExecutionService {
         : [],
     };
 
-    console.log("\n========== SECURE ENGINE REQUEST ==========");
-    console.log("URL:", this.engineUrl);
-    console.log("Language:", payload.language);
-    console.log("Code length:", payload.code.length);
-    console.log("Time limit:", payload.timeLimit);
-    console.log("Memory limit:", payload.memoryLimit);
-    console.log("Test case count:", payload.testCases.length);
-    console.log("Test cases:", JSON.stringify(payload.testCases, null, 2));
-    console.log("API key present:", Boolean(this.apiKey));
-    console.log("Code first 500 chars:");
-    console.log(payload.code.substring(0, 500));
-    console.log("Code last 500 chars:");
-    console.log(payload.code.substring(Math.max(0, payload.code.length - 500)));
-    console.log("===========================================\n");
+    // Log execution details only in development mode, redacted for security
+    if (process.env.NODE_ENV === "development") {
+      console.log("[ExecutionService] Request:", {
+        url: this.engineUrl,
+        language: payload.language,
+        codeLength: payload.code.length,
+        timeLimit: payload.timeLimit,
+        memoryLimit: payload.memoryLimit,
+        testCaseCount: payload.testCases.length,
+      });
+    }
 
     const controller =
       typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -198,18 +195,10 @@ export class ExecutionService {
         signal: controller?.signal,
       });
 
-      console.log("========== SECURE ENGINE RESPONSE ==========");
-      console.log("HTTP status:", response.status);
-      console.log("HTTP status text:", response.statusText);
-      console.log("=============================================\n");
-
       let body;
 
       if (typeof response.text === "function") {
         const responseText = await response.text();
-
-        console.log("Engine raw response:", responseText);
-
         try {
           body = JSON.parse(responseText);
         } catch {
@@ -217,7 +206,6 @@ export class ExecutionService {
         }
       } else if (typeof response.json === "function") {
         body = await response.json();
-        console.log("Engine response:", JSON.stringify(body, null, 2));
       } else {
         body = {
           error: "Unrecognized response interface from execution engine.",
@@ -226,15 +214,17 @@ export class ExecutionService {
 
       if (!response.ok) {
         const engineError = body?.error || body?.message || body?.details || "";
-
         const errorMessage = engineError
           ? `Secure Code Engine error: ${engineError}`
           : `Secure Code Engine returned HTTP ${response.status}`;
 
-        console.error("========== ENGINE REQUEST FAILED ==========");
-        console.error("HTTP:", response.status);
-        console.error("Error:", engineError);
-        console.error("============================================");
+        // Log only error info, never expose full response/code
+        if (process.env.NODE_ENV === "development") {
+          console.error("[ExecutionService] Engine error:", {
+            status: response.status,
+            error: engineError,
+          });
+        }
 
         return {
           status: "SYSTEM_ERROR",
@@ -252,11 +242,13 @@ export class ExecutionService {
 
       return normalizeEngineResponse(body);
     } catch (error) {
-      console.log("========== ENGINE ERROR ==========");
-      console.log("name:", error.name);
-      console.log("message:", error.message);
-      console.log("stack:", error.stack);
-      console.log("==================================");
+      // Log error safely, never expose sensitive data
+      if (process.env.NODE_ENV === "development") {
+        console.error("[ExecutionService] Error:", {
+          name: error.name,
+          message: error.message,
+        });
+      }
 
       if (error.name === "AbortError") {
         throw new Error("Secure Code Engine timed out.");

@@ -39,7 +39,19 @@ function isValidLanguage(lang) {
 
 /**
  * Robustly parse date, time, and timezone parameters into UTC Date objects.
- * Handles ISO timestamps, date pickers with 12h/24h strings, and timezones.
+ *
+ * IMPORTANT: Room scheduling is ALWAYS stored as UTC Date objects in MongoDB.
+ * Comparison with server time `new Date()` is timezone-safe because both are
+ * in UTC epoch milliseconds, regardless of browser or server timezone.
+ *
+ * Timezone string is stored for reference only (for the UI to display back to
+ * the creator what timezone they selected), but is never used for access
+ * control decisions. All access decisions use UTC Date comparison only.
+ *
+ * Handles:
+ * 1. ISO 8601 timestamps (direct pass-through)
+ * 2. Date picker + time string inputs with timezone conversion
+ *    Examples: "2026-01-15", "03:30 PM", "15:30" (24h), timezone="Asia/Kolkata"
  */
 function parseSchedule({
   startTime,
@@ -53,7 +65,7 @@ function parseSchedule({
   const now = new Date();
   const tz = timezone || "UTC";
 
-  // 1. Direct ISO 8601 strings or timestamp inputs
+  // 1. Direct ISO 8601 strings or timestamp inputs (highest priority)
   if (startTime && endTime) {
     const s = new Date(startTime);
     const e = new Date(endTime);
@@ -62,28 +74,35 @@ function parseSchedule({
     }
   }
 
-  // 2. Scheduled Date + Time string inputs
+  // 2. Scheduled Date + Time string inputs (date picker workflow)
   if (scheduledDate && scheduledStartTime) {
     const parseTimeString = (dateStr, timeStr) => {
       const trimmed = (timeStr || "").trim();
+      // Match "3:30 PM", "3:30", "15:30", "15:30 PM" (12h and 24h formats)
       const match = trimmed.match(/^(\d{1,2}):(\d{2})(?:\s*([aApP][mM]))?$/);
       if (!match) return null;
       let hours = parseInt(match[1], 10);
       const minutes = parseInt(match[2], 10);
       const meridiem = match[3] ? match[3].toUpperCase() : null;
+
+      // Convert 12-hour to 24-hour if meridiem is specified
       if (meridiem === "PM" && hours < 12) hours += 12;
       if (meridiem === "AM" && hours === 12) hours = 0;
 
       const pad = (n) => String(n).padStart(2, "0");
+      // ISO format: YYYY-MM-DDTHH:mm:ss
       const localIso = `${dateStr}T${pad(hours)}:${pad(minutes)}:00`;
 
+      // Handle known timezones directly
       if (tz === "UTC") {
         return new Date(`${localIso}Z`);
       }
       if (tz === "Asia/Kolkata" || tz === "IST") {
+        // IST is UTC+05:30
         return new Date(`${localIso}+05:30`);
       }
 
+      // For other timezones, use Intl API to get offset (best-effort)
       try {
         const targetDate = new Date(`${dateStr}T12:00:00Z`);
         const formatter = new Intl.DateTimeFormat("en-US", {
@@ -92,14 +111,17 @@ function parseSchedule({
         });
         const parts = formatter.formatToParts(targetDate);
         const tzPart = parts.find((p) => p.type === "timeZoneName");
+        // Extract offset like "GMT+05:30" or "GMT-08:00"
         const offsetMatch = tzPart?.value?.match(/GMT([+-]\d{2}):(\d{2})/);
         if (offsetMatch) {
           return new Date(`${localIso}${offsetMatch[1]}:${offsetMatch[2]}`);
         }
-      } catch {
-        // Fallback
+      } catch (err) {
+        // Intl API failed, fall through to default
       }
-      return new Date(localIso);
+
+      // Fallback: treat as UTC if we can't determine offset
+      return new Date(`${localIso}Z`);
     };
 
     const s = parseTimeString(scheduledDate, scheduledStartTime);
@@ -108,6 +130,7 @@ function parseSchedule({
       : null;
 
     if (s && !isNaN(s.getTime())) {
+      // If end time not provided or invalid, compute it from duration
       if (!e || isNaN(e.getTime()) || e <= s) {
         e = new Date(s.getTime() + (durationMinutes || 60) * 60 * 1000);
       }
@@ -115,7 +138,7 @@ function parseSchedule({
     }
   }
 
-  // 3. Fallback: Start immediately with given duration
+  // 3. Fallback: No schedule provided. Start immediately with given duration.
   const start = now;
   const end = new Date(now.getTime() + (durationMinutes || 60) * 60 * 1000);
   return { start, end, timezone: tz };
@@ -599,7 +622,7 @@ export async function getRoomByCode(req, res) {
       room: roomData,
       isCreator,
       isParticipant,
-      questionsVisible: isCreator || room.status === "ACTIVE",
+      questionsVisible: isCreator || windowState.state === ROOM_WINDOW_STATE.ACTIVE,
       roomKey: isCreator ? room.roomCode : undefined,
       userSubmission: userSubmission
         ? {
