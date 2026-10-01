@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS submissions (
     user_id UUID NOT NULL REFERENCES users(id),
     challenge_id UUID NOT NULL REFERENCES challenges(id),
     code TEXT NOT NULL,
-    language VARCHAR(20) DEFAULT 'javascript' CHECK (language IN ('javascript', 'python', 'java', 'cpp')),
+    language VARCHAR(20) DEFAULT 'java' CHECK (language = 'java'),
     status VARCHAR(20) DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'PROCESSING', 'ACCEPTED', 'REJECTED', 'ERROR', 'DISQUALIFIED')),
     score DOUBLE PRECISION DEFAULT 0,
     passed INTEGER DEFAULT 0,
@@ -103,4 +103,3 @@ BEGIN
     WHERE otp_expiry < NOW() AND is_verified = FALSE;
 END;
 $$ LANGUAGE plpgsql;
-

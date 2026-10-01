@@ -2,9 +2,8 @@ import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { createRoom } from "../services/battleRoomService";
 import RoomKeyModal from "../components/battleRoom/RoomKeyModal";
+import { useAuth } from "../context/AuthContext";
 import {
-  SUPPORTED_LANGUAGES,
-  TIME_LIMIT_UNITS,
   CATEGORY_VALUES,
   TAG_SUGGESTIONS,
 } from "../utils/constants";
@@ -59,7 +58,7 @@ const emptyQuestion = {
   signaturePreview: {},
   // Step 4 — reference solution
   referenceSolution: "",
-  referenceSolutionLanguage: "python",
+  referenceSolutionLanguage: "java",
   // Step 5 — parameter-based test cases
   visibleTestCases: [],
   hiddenTestCases: [],
@@ -88,20 +87,17 @@ function formatTestCasesForPreview(tcs, params, max = 3) {
 
 export default function CreateBattleRoom() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   // Room-level state
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [timeLimit, setTimeLimit] = useState(1);
-  const [timeLimitUnit, setTimeLimitUnit] = useState("hours");
   const [maxParticipants, setMaxParticipants] = useState(100);
-  const [languages, setLanguages] = useState(["java"]);
   const [moderationAction, setModerationAction] = useState("FLAG");
   const [allowLeaderboard, setAllowLeaderboard] = useState(true);
   const [allowReuse, setAllowReuse] = useState(true);
-  const [scheduledDate, setScheduledDate] = useState("");
-  const [scheduledStartTime, setScheduledStartTime] = useState("");
-  const [scheduledEndTime, setScheduledEndTime] = useState("");
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
 
   // Questions
   const [questions, setQuestions] = useState([{ ...emptyQuestion }]);
@@ -116,8 +112,10 @@ export default function CreateBattleRoom() {
   const [roomKey, setRoomKey] = useState("");
   const [createdRoom, setCreatedRoom] = useState(null);
   const [showKeyModal, setShowKeyModal] = useState(false);
-
-  const currentQuestion = questions[currentQuestionIndex] || { ...emptyQuestion };
+  const currentQuestion = useMemo(
+    () => questions[currentQuestionIndex] || { ...emptyQuestion },
+    [questions, currentQuestionIndex],
+  );
 
   const updateCurrentQuestion = (updated) => {
     const updatedQuestions = [...questions];
@@ -144,24 +142,16 @@ export default function CreateBattleRoom() {
     setCurrentQuestionIndex(Math.max(0, index - 1));
   };
 
-  const toggleLanguage = (lid) => {
-    setLanguages((prev) => {
-      if (lid === "all") return ["all"];
-      let next = prev.filter((l) => l !== "all");
-      if (next.includes(lid)) {
-        next = next.filter((l) => l !== lid);
-      } else {
-        next.push(lid);
-      }
-      return next.length === 0 ? ["all"] : next;
-    });
-  };
-
   const canGoNext = useMemo(() => {
     const q = currentQuestion;
     switch (STEPS[currentStep]?.id) {
       case "room":
-        return title.trim() !== "";
+        return (
+          title.trim() !== "" &&
+          startDate !== "" &&
+          endDate !== "" &&
+          new Date(endDate) > new Date(startDate)
+        );
       case "basic":
         return q.title.trim() !== "" && q.description.trim() !== "";
       case "signature":
@@ -175,7 +165,7 @@ export default function CreateBattleRoom() {
         );
       case "cases":
         return (
-          (q.visibleTestCases || []).length > 0 &&
+          (q.visibleTestCases || []).length >= 3 &&
           (q.hiddenTestCases || []).length > 0
         );
       case "reference":
@@ -183,7 +173,13 @@ export default function CreateBattleRoom() {
       default:
         return true;
     }
-  }, [currentStep, title, currentQuestion]);
+  }, [
+    currentStep,
+    title,
+    currentQuestion,
+    startDate,
+    endDate,
+  ]);
 
   const goNext = () => {
     if (currentStep < STEPS.length - 1) {
@@ -199,6 +195,16 @@ export default function CreateBattleRoom() {
 
   const handleCreate = async () => {
     setError("");
+    if (!user?.id && !user?._id) {
+      setError("Sign in before creating a battle room.");
+      return;
+    }
+    if (!startDate || !endDate || new Date(endDate) <= new Date(startDate)) {
+      setError(
+        "Enter a valid start and end date/time. The end must be after the start.",
+      );
+      return;
+    }
     setCreating(true);
     try {
       const payload = {
@@ -236,16 +242,12 @@ export default function CreateBattleRoom() {
             expectedOutputSource: "reference",
           };
         }),
-        timeLimit,
-        timeLimitUnit,
         maxParticipants,
-        languages,
         moderationAction,
         allowLeaderboard,
         allowReuse,
-        scheduledDate,
-        scheduledStartTime,
-        scheduledEndTime,
+        startDate: new Date(startDate).toISOString(),
+        endDate: new Date(endDate).toISOString(),
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       };
 
@@ -254,8 +256,6 @@ export default function CreateBattleRoom() {
       setCreatedRoom(data.room || {
         title: title.trim(),
         maxParticipants,
-        timeLimit,
-        timeLimitUnit,
       });
       setShowKeyModal(true);
     } catch (err) {
@@ -274,7 +274,7 @@ export default function CreateBattleRoom() {
           Create Battle Room
         </h1>
         <p style={{ color: "var(--text-muted)", fontSize: 13, margin: 0 }}>
-          Define each question once — the platform generates starter code and judge wrappers for Java, Python, C++, and C.
+          Define each question once — the platform generates Java starter code and judge wrappers.
           Test cases are parameter-based and expected outputs are generated automatically from your reference solution.
         </p>
       </div>
@@ -331,71 +331,41 @@ export default function CreateBattleRoom() {
               <label style={labelStyle}>Description</label>
               <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Describe what this battle is about..." rows={2} style={{ ...inputStyle, resize: "vertical" }} />
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-              <div>
-                <label style={labelStyle}>Time Limit *</label>
-                <input type="number" value={timeLimit} onChange={(e) => setTimeLimit(parseInt(e.target.value) || 1)} min={1} style={inputStyle} />
-              </div>
-              <div>
-                <label style={labelStyle}>Unit</label>
-                <select value={timeLimitUnit} onChange={(e) => setTimeLimitUnit(e.target.value)} style={{ ...inputStyle, cursor: "pointer" }}>
-                  {TIME_LIMIT_UNITS.map((u) => (
-                    <option key={u.id} value={u.id}>{u.label}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label style={labelStyle}>Max Participants</label>
-                <input type="number" value={maxParticipants} onChange={(e) => setMaxParticipants(parseInt(e.target.value) || 10)} min={1} max={500} style={inputStyle} />
-              </div>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-              <div>
-                <label style={labelStyle}>Battle date (IST)</label>
-                <input type="date" value={scheduledDate} onChange={(e) => setScheduledDate(e.target.value)} style={inputStyle} />
-              </div>
-              <div>
-                <label style={labelStyle}>Start time (IST, 12-hour)</label>
-                <input type="text" placeholder="09:00 AM" value={scheduledStartTime} onChange={(e) => setScheduledStartTime(e.target.value)} style={inputStyle} />
-              </div>
-              <div>
-                <label style={labelStyle}>End time (IST, 12-hour)</label>
-                <input type="text" placeholder="11:00 AM" value={scheduledEndTime} onChange={(e) => setScheduledEndTime(e.target.value)} style={inputStyle} />
-              </div>
-            </div>
-
             <div>
-              <label style={labelStyle}>Language</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {SUPPORTED_LANGUAGES.map((lang) => {
-                  const active = languages.includes(lang.id) && !languages.includes("all");
-                  return (
-                    <button
-                      key={lang.id}
-                      onClick={() => toggleLanguage(lang.id)}
-                      style={{
-                        padding: "6px 14px",
-                        borderRadius: 6,
-                        border: `1px solid ${active ? "var(--accent-blue)" : "var(--border-strong)"}`,
-                        background: active ? "var(--accent-blue-soft)" : "var(--bg-card)",
-                        color: active ? "var(--accent-blue-bright)" : "var(--text-muted)",
-                        fontSize: 12,
-                        fontFamily: "var(--font-ui)",
-                        fontWeight: 600,
-                        cursor: "pointer",
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 5,
-                      }}
-                    >
-                      {active && <Check size={12} />}
-                      {lang.label}
-                    </button>
-                  );
-                })}
+              <label style={labelStyle}>Max Participants</label>
+              <input type="number" value={maxParticipants} onChange={(e) => setMaxParticipants(parseInt(e.target.value) || 10)} min={1} max={500} style={inputStyle} />
+            </div>
+
+            <h3 style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-ui)", margin: "4px 0 -4px", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+              Battle schedule *
+            </h3>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label style={labelStyle}>Start date & time *</label>
+                <input
+                  type="datetime-local"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                  style={inputStyle}
+                  required
+                />
+              </div>
+              <div>
+                <label style={labelStyle}>End date & time *</label>
+                <input
+                  type="datetime-local"
+                  value={endDate}
+                  min={startDate || undefined}
+                  onChange={(e) => setEndDate(e.target.value)}
+                  style={inputStyle}
+                  required
+                />
               </div>
             </div>
+            <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "-6px 0 0" }}>
+              Times use your local time zone. Choose the same date for a one-day challenge or different dates for a multi-day challenge.
+            </p>
+
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <div>
                 <label style={labelStyle}>Suspicious activity policy</label>
@@ -665,6 +635,18 @@ export default function CreateBattleRoom() {
       {/* STEP 6: Validate & Create */}
       {currentStepId === "validate" && (
         <div style={{ display: "grid", gap: 16 }}>
+          <section style={{ background: "var(--bg-elevated)", border: "1px solid rgba(46,160,67,0.55)", borderRadius: 10, padding: 20 }}>
+            <h2 style={{ color: "var(--text-primary)", fontSize: 14, margin: "0 0 6px", display: "flex", alignItems: "center", gap: 7 }}>
+              <ShieldCheck size={16} color="var(--color-success)" />
+              Room owner
+            </h2>
+            <p style={{ color: "var(--text-muted)", fontSize: 12, margin: "0 0 14px" }}>
+              This room will be owned by your authenticated CodeClash account. You do not need to verify again to create another room.
+            </p>
+            <div style={{ color: "var(--text-primary)", fontSize: 13 }}>
+              {user?.name} <span style={{ color: "var(--text-muted)" }}>· {user?.email}</span>
+            </div>
+          </section>
           {questions.map((q, i) => (
             <div key={i} style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-color)", borderRadius: 10, padding: 20 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
@@ -686,7 +668,7 @@ export default function CreateBattleRoom() {
                 {"  ·  "}
                 <strong style={{ color: "var(--text-secondary)" }}>Params:</strong> {(q.parameters || []).map((p) => `${p.name}:${p.type}`).join(", ") || "—"}
                 {"  ·  "}
-                <strong style={{ color: "var(--text-secondary)" }}>Test cases:</strong> visible {q.visibleTestCases?.length || 0} / hidden {q.hiddenTestCases?.length || 0}
+                <strong style={{ color: "var(--text-secondary)" }}>Test cases:</strong> visible {q.visibleTestCases?.length || 0} (minimum 3) / hidden {q.hiddenTestCases?.length || 0}
               </div>
             </div>
           ))}
@@ -696,7 +678,7 @@ export default function CreateBattleRoom() {
               Summary
             </h2>
             <div style={{ display: "grid", gap: 6, fontSize: 12, fontFamily: "var(--font-ui)", color: "var(--text-muted)" }}>
-              <div><strong style={{ color: "var(--text-secondary)" }}>Room:</strong> {title || "Untitled"} · {timeLimit} {timeLimitUnit} · max {maxParticipants} participants · {questions.length} question(s)</div>
+              <div><strong style={{ color: "var(--text-secondary)" }}>Room:</strong> {title || "Untitled"} · {startDate ? new Date(startDate).toLocaleString() : "Start not set"}–{endDate ? new Date(endDate).toLocaleString() : "End not set"} · max {maxParticipants} participants · {questions.length} question(s)</div>
               {questions.map((q, i) => (
                 <div key={i}>
                   <strong style={{ color: "var(--text-secondary)" }}>Q{i + 1} · {q.category || q.problemType}:</strong>{" "}
@@ -740,7 +722,7 @@ export default function CreateBattleRoom() {
               onClick={handleCreate}
               disabled={creating}
               className="btn-primary"
-              style={{ padding: "10px 32px", fontSize: 13 }}
+              style={{ padding: "10px 32px", fontSize: 13, opacity: creating ? 0.55 : 1 }}
             >
               {creating ? <Loader2 size={14} style={{ animation: "spin 1s linear infinite" }} /> : <Check size={14} />}
               {creating ? "Creating Room..." : "Create Room & Generate Key"}

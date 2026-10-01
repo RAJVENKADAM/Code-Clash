@@ -1,161 +1,92 @@
-import { useState, useRef, useCallback } from "react";
-import { formatMemory, getStatusColor } from "../../utils/helpers";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { getStatusColor } from "../../utils/helpers";
 import {
   CheckCircle2,
   XCircle,
-  Clock,
-  Cpu,
   Terminal,
   ChevronUp,
   ChevronDown,
   GripHorizontal,
   AlertTriangle,
-  Eye,
-  EyeOff,
 } from "lucide-react";
 
-function TestCaseChip({
-  testCase,
-  status,
-  executionTime,
-  memoryUsed,
-  output,
-  expectedOutput,
-  error,
-  isHidden,
-}) {
-  const color = getStatusColor(status);
-  const isPassed = status === "PASSED" || status === "ACCEPTED";
-  const isError = status === "SYSTEM_ERROR" || status === "ERROR";
-  const hasExpected =
-    expectedOutput !== undefined &&
-    expectedOutput !== null &&
-    expectedOutput !== "";
+const STATUS_LABELS = {
+  ACCEPTED: "Accepted",
+  PASSED: "Accepted",
+  FAILED: "Wrong Answer",
+  REJECTED: "Wrong Answer",
+  WRONG_ANSWER: "Wrong Answer",
+  COMPILE_ERROR: "Compilation Error",
+  COMPILATION_ERROR: "Compilation Error",
+  RUNTIME_ERROR: "Runtime Error",
+  TIME_LIMIT_EXCEEDED: "Time Limit Exceeded",
+  MEMORY_LIMIT_EXCEEDED: "Memory Limit Exceeded",
+  SYSTEM_ERROR: "System Error",
+  PENDING: "Pending",
+  PROCESSING: "Processing",
+};
 
-  return (
+function formatStatus(status) {
+  return STATUS_LABELS[status] || String(status || "Processing").replaceAll("_", " ");
+}
+
+// Individual display box for code results (Input, Output, Expected)
+const CodeDataBox = ({ label, value, isError = false, isSuccess = false }) => (
+  <div style={{ marginBottom: 16 }}>
     <div
       style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: 4,
-        background: "var(--bg-elevated)",
-        border: `1px solid ${color}33`,
-        borderRadius: 6,
-        padding: "8px 12px",
         fontSize: 12,
-        fontFamily: "var(--font-ui)",
+        fontWeight: 600,
+        color: "var(--text-muted)",
+        marginBottom: 6,
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        {isPassed ? (
-          <CheckCircle2 size={16} color={color} style={{ flexShrink: 0 }} />
-        ) : (
-          <XCircle size={16} color={color} style={{ flexShrink: 0 }} />
-        )}
-        <span style={{ color: "var(--text-primary)", fontWeight: 600 }}>
-          #{testCase}
-        </span>
-        {isHidden && (
-          <span
-            style={{
-              color: "var(--text-muted)",
-              fontSize: 10,
-              fontWeight: 600,
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 3,
-            }}
-          >
-            <EyeOff size={11} /> hidden
-          </span>
-        )}
-        <span style={{ color, fontWeight: 600, fontSize: 11 }}>{status}</span>
-        <div
-          style={{
-            marginLeft: "auto",
-            display: "flex",
-            gap: 14,
-            alignItems: "center",
-            color: "var(--text-muted)",
-            fontSize: 11,
-          }}
-        >
-          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <Clock size={11} /> {executionTime}ms
-          </span>
-          <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <Cpu size={11} /> {formatMemory(memoryUsed)}
-          </span>
-        </div>
-      </div>
-      {hasExpected && (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 2,
-            marginTop: 2,
-            padding: "4px 8px",
-            background: "rgba(0,0,0,0.15)",
-            borderRadius: 4,
-            fontSize: 11,
-            fontFamily: "var(--font-code)",
-          }}
-        >
-          <div style={{ color: "var(--color-success)" }}>
-            Expected:{" "}
-            <span style={{ color: "var(--text-primary)" }}>
-              {expectedOutput}
-            </span>
-          </div>
-          <div
-            style={{
-              color: isPassed ? "var(--color-success)" : "var(--color-danger)",
-            }}
-          >
-            Your Output:{" "}
-            <span style={{ color: "var(--text-primary)" }}>
-              {output || "(empty)"}
-            </span>
-          </div>
-        </div>
-      )}
-      {isError &&
-        (error ||
-          (output && output.startsWith("Internal execution error"))) && (
-          <div
-            style={{
-              marginTop: 2,
-              padding: "4px 8px",
-              background: "rgba(218,54,51,0.1)",
-              borderRadius: 4,
-              fontSize: 11,
-              fontFamily: "var(--font-code)",
-              color: "var(--color-danger)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-            }}
-          >
-            <AlertTriangle
-              size={11}
-              style={{ verticalAlign: "middle", marginRight: 4 }}
-            />
-            {error || output}
-          </div>
-        )}
+      {label}
     </div>
-  );
-}
+    <div
+      style={{
+        background: isError
+          ? "rgba(218,54,51,0.08)"
+          : isSuccess
+            ? "rgba(44, 187, 93, 0.08)"
+            : "rgba(0,0,0,0.15)",
+        border: `1px solid ${
+          isError
+            ? "rgba(218,54,51,0.2)"
+            : isSuccess
+              ? "rgba(44, 187, 93, 0.2)"
+              : "var(--border-color)"
+        }`,
+        borderRadius: 8,
+        padding: "10px 14px",
+        fontFamily: "var(--font-code)",
+        fontSize: 13,
+        color: isError ? "var(--color-danger)" : "var(--text-primary)",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+      }}
+    >
+      {value !== undefined && value !== null && value !== "" ? (
+        value
+      ) : (
+        <span style={{ color: "var(--text-faint)", fontStyle: "italic" }}>
+          Empty
+        </span>
+      )}
+    </div>
+  </div>
+);
 
 export default function Console({
   result,
   isOpen,
   onToggle,
-  height = 260,
+  height = 320,
   onHeightChange,
 }) {
-  const [activeTab, setActiveTab] = useState("testcases");
-  const [showAll, setShowAll] = useState(false);
+  const [activeTestCaseIndex, setActiveTestCaseIndex] = useState(0);
+
+  // Smooth window-level drag handling
   const draggingRef = useRef(false);
   const startYRef = useRef(0);
   const startHeightRef = useRef(0);
@@ -172,75 +103,73 @@ export default function Console({
     [height],
   );
 
-  const onDragMove = useCallback(
-    (e) => {
+  useEffect(() => {
+    const handleMouseMove = (e) => {
       if (!draggingRef.current) return;
       const delta = startYRef.current - e.clientY;
       const next = Math.min(
         Math.max(startHeightRef.current + delta, 120),
-        window.innerHeight - 200,
+        window.innerHeight - 150,
       );
       if (onHeightChange) onHeightChange(next);
-    },
-    [onHeightChange],
-  );
+    };
 
-  const onDragEnd = useCallback(() => {
-    if (!draggingRef.current) return;
-    draggingRef.current = false;
-    document.body.style.userSelect = "";
-    document.body.style.cursor = "";
-  }, []);
+    const handleMouseUp = () => {
+      if (!draggingRef.current) return;
+      draggingRef.current = false;
+      document.body.style.userSelect = "";
+      document.body.style.cursor = "";
+    };
 
-  const passed = result?.passed || 0;
-  const failed = result?.failed || 0;
-  const total = result?.total || 0;
-  const results = result?.results || [];
-  const output = result?.output || "";
-  const error = result?.error || "";
-  const details = result?.details || "";
-  const accepted = result?.accepted || false;
-  const allPassed = passed === total && total > 0;
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
 
-  // Split results into visible and hidden test cases.
-  const visibleResults = results.filter((r) => !r.isHidden);
-  const hiddenResults = results.filter((r) => r.isHidden);
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [onHeightChange]);
 
-  const visibleLimit = 3;
-  const visibleFailing = visibleResults.filter((r) => r.status !== "PASSED");
-  const defaultVisible = visibleResults.slice(0, visibleLimit);
-  const visibleToShow = showAll
-    ? visibleResults
-    : (() => {
-        const merged = [...defaultVisible];
-        for (const f of visibleFailing) {
-          if (!merged.some((m) => m.testCase === f.testCase)) {
-            merged.push(f);
-          }
-        }
-        return merged;
-      })();
+  // Safely extract metadata
+  const results = Array.isArray(result?.results) ? result.results : [];
+  const total = Math.max(Number(result?.total) || 0, results.length);
+  const passed = results.filter((testCase) =>
+    ["PASSED", "ACCEPTED"].includes(testCase.status),
+  ).length;
+  const failed = Math.max(0, total - passed);
+  const isFatalStatus = [
+    "COMPILATION_ERROR",
+    "RUNTIME_ERROR",
+    "TIME_LIMIT_EXCEEDED",
+    "MEMORY_LIMIT_EXCEEDED",
+    "SYSTEM_ERROR",
+  ].includes(result?.status);
+  const status = isFatalStatus
+    ? result.status
+    : !result
+      ? "PROCESSING"
+      : result.status === "PENDING" || result.status === "PROCESSING"
+        ? result.status
+        : total === 0
+          ? "SYSTEM_ERROR"
+          : passed === total && failed === 0
+            ? "ACCEPTED"
+            : "WRONG_ANSWER";
+  const allPassed = status === "ACCEPTED" && passed === total && failed === 0;
+  const globalError = result?.error || "";
 
-  const hiddenFailing = hiddenResults.filter((r) => r.status !== "PASSED");
-  const allVisiblePassed =
-    visibleResults.length > 0 &&
-    visibleResults.every((r) => r.status === "PASSED");
-  const showHidden = allVisiblePassed && hiddenFailing.length > 0;
-  const hiddenToShow = showHidden ? hiddenFailing : [];
+  const displayedTestCases = results
+    .map((testCase, index) => ({ testCase, index }))
+  const activeTestCaseEntry =
+    displayedTestCases[activeTestCaseIndex] || displayedTestCases[0];
+  const activeTestCase = activeTestCaseEntry?.testCase;
 
-  const hiddenPassed =
-    (result?.hiddenPassed ??
-      hiddenResults.filter((r) => r.status === "PASSED").length) ||
-    0;
-  const hiddenFailed = (result?.hiddenFailed ?? hiddenFailing.length) || 0;
-  const hasHidden =
-    hiddenResults.length > 0 || (result?.hiddenTestCases ?? 0) > 0;
+  useEffect(() => {
+    setActiveTestCaseIndex(0);
+  }, [result]);
 
   return (
     <div
-      onMouseMove={onDragMove}
-      onMouseUp={onDragEnd}
-      onMouseLeave={onDragEnd}
       style={{
         borderTop: "1px solid var(--border-color)",
         background: "var(--bg-card)",
@@ -249,9 +178,9 @@ export default function Console({
         height: isOpen ? height : "auto",
         minHeight: 40,
         position: "relative",
-        overflow: "hidden",
       }}
     >
+      {/* Resizer Handle */}
       {isOpen && (
         <div
           onMouseDown={onDragStart}
@@ -264,21 +193,29 @@ export default function Console({
             background: "var(--bg-elevated)",
             borderBottom: "1px solid var(--border-color)",
             userSelect: "none",
-            touchAction: "none",
             flexShrink: 0,
+            transition: "background 0.2s",
           }}
+          onMouseEnter={(e) =>
+            (e.currentTarget.style.background = "var(--border-strong)")
+          }
+          onMouseLeave={(e) =>
+            (e.currentTarget.style.background = "var(--bg-elevated)")
+          }
         >
-          <GripHorizontal size={14} color="var(--text-faint)" />
+          <GripHorizontal color="var(--text-faint)" size={14} />
         </div>
       )}
+
+      {/* Console Header Toggle */}
       <div
         onClick={onToggle}
         style={{
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          padding: "7px 16px",
-          background: "var(--bg-elevated)",
+          padding: "10px 16px",
+          background: "var(--bg-card)",
           borderBottom: isOpen ? "1px solid var(--border-color)" : "none",
           cursor: "pointer",
           userSelect: "none",
@@ -286,89 +223,47 @@ export default function Console({
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          {isOpen ? (
-            <ChevronDown size={14} color="var(--text-muted)" />
-          ) : (
-            <ChevronUp size={14} color="var(--text-muted)" />
-          )}
           <span
             style={{
-              color: "var(--text-primary)",
-              fontSize: 13,
+              color: isOpen ? "var(--text-primary)" : "var(--text-muted)",
+              fontSize: 14,
               fontFamily: "var(--font-ui)",
               fontWeight: 600,
               display: "flex",
               alignItems: "center",
-              gap: 6,
+              gap: 8,
+              transition: "color 0.2s ease",
             }}
           >
-            <Terminal size={13} color="var(--accent-blue-bright)" />
+            {isOpen ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+            <Terminal
+              color={isOpen ? "var(--accent-blue-bright)" : "var(--text-muted)"}
+              size={14}
+            />
             Console
           </span>
-          {result && (
-            <>
-              <span
-                style={{
-                  color: allPassed
-                    ? "var(--color-success)"
-                    : "var(--color-warning)",
-                  fontSize: 12,
-                  fontWeight: 600,
-                }}
-              >
-                {passed}/{total} passed
-              </span>
-              {failed > 0 && (
-                <span
-                  style={{
-                    color: "var(--color-danger)",
-                    fontSize: 12,
-                    fontWeight: 600,
-                  }}
-                >
-                  {failed} failed
-                </span>
-              )}
-            </>
-          )}
-          {result?.executionTime > 0 && (
+
+          {/* Mini Status Summary in header */}
+          {result && !isOpen && (
             <span
               style={{
-                color: "var(--text-muted)",
-                fontSize: 11,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-              }}
-            >
-              <Clock size={11} /> {result.executionTime}ms
-              <Cpu size={11} /> {formatMemory(result.memoryUsed)}
-            </span>
-          )}
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          {result?.status && (
-            <span
-              style={{
-                color: getStatusColor(result.status),
-                borderColor: `${getStatusColor(result.status)}44`,
-                background: `${getStatusColor(result.status)}14`,
-                padding: "2px 8px",
-                borderRadius: 4,
-                fontSize: 11,
+                color: getStatusColor(status),
+                fontSize: 13,
                 fontWeight: 600,
                 display: "flex",
                 alignItems: "center",
-                gap: 5,
+                gap: 6,
+                marginLeft: 12,
               }}
             >
-              {accepted ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
-              {result.status}
+              {allPassed ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
+              {formatStatus(status)}
             </span>
           )}
         </div>
       </div>
 
+      {/* Main Console Content */}
       {isOpen && (
         <div
           style={{
@@ -376,210 +271,194 @@ export default function Console({
             display: "flex",
             flexDirection: "column",
             overflow: "hidden",
-            minHeight: 0,
+            background: "var(--bg-elevated)",
           }}
         >
           <div
             style={{
               display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 12,
+              flexWrap: "wrap",
               borderBottom: "1px solid var(--border-color)",
+              padding: "12px 16px",
               background: "var(--bg-card)",
-              padding: "0 8px",
-              flexShrink: 0,
             }}
           >
-            {["testcases", "output", "error"]
-              .filter((tab) => {
-                if (tab === "error")
-                  return (
-                    error ||
-                    results.some(
-                      (r) =>
-                        r.status === "SYSTEM_ERROR" || r.status === "ERROR",
-                    )
-                  );
-                return true;
-              })
-              .map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setActiveTab(tab)}
-                  className={`tab-btn ${activeTab === tab ? "active" : ""}`}
-                  style={{ fontSize: 12, padding: "6px 14px" }}
-                >
-                  {tab.charAt(0).toUpperCase() + tab.slice(1)}
-                  {tab === "error" && error && (
-                    <span
-                      style={{ color: "var(--color-danger)", marginLeft: 4 }}
-                    >
-                      (
-                      {results.filter(
-                        (r) =>
-                          r.status === "ERROR" || r.status === "SYSTEM_ERROR",
-                      ).length || 1}
-                      )
-                    </span>
-                  )}
-                </button>
-              ))}
+            <strong style={{ color: "var(--text-primary)", fontSize: 14 }}>
+              Test Results
+            </strong>
+            {result && (
+              <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                <span style={{ color: getStatusColor(status), fontSize: 13, fontWeight: 700 }}>
+                  {formatStatus(status)}
+                </span>
+                <span style={{ color: "var(--color-success)", fontSize: 12 }}>
+                  {passed} passed
+                </span>
+                <span style={{ color: failed > 0 ? "var(--color-danger)" : "var(--text-muted)", fontSize: 12 }}>
+                  {failed} failed
+                </span>
+                {total > 0 && (
+                  <span style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                    {total} total
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           <div
             style={{
               flex: 1,
               overflow: "auto",
-              padding: 12,
+              padding: 16,
               fontFamily: "var(--font-ui)",
-              fontSize: 13,
             }}
           >
-            {activeTab === "testcases" && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {results.length === 0 && (
-                  <div
-                    style={{
-                      color: "var(--text-muted)",
-                      textAlign: "center",
-                      padding: 24,
-                    }}
-                  >
-                    No test cases executed yet.
-                  </div>
-                )}
-
-                {visibleToShow.map((tc) => (
-                  <TestCaseChip
-                    key={tc.testCase}
-                    testCase={tc.testCase}
-                    status={tc.status}
-                    executionTime={tc.executionTime}
-                    memoryUsed={tc.memoryUsed}
-                    output={tc.output}
-                    expectedOutput={tc.expectedOutput}
-                    error={tc.error || error}
-                    isHidden={false}
-                  />
-                ))}
-
-                {!showAll && visibleResults.length > visibleToShow.length && (
-                  <button
-                    onClick={() => setShowAll(true)}
-                    style={{
-                      background: "transparent",
-                      border: "1px solid var(--border-strong)",
-                      color: "var(--accent-blue-bright)",
-                      borderRadius: 6,
-                      padding: "6px 12px",
-                      fontSize: 12,
-                      fontFamily: "var(--font-ui)",
-                      cursor: "pointer",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      gap: 6,
-                    }}
-                  >
-                    <Eye size={12} /> Show all {visibleResults.length} visible
-                    test cases
-                  </button>
-                )}
-
-                {hasHidden && (
-                  <div
-                    style={{
-                      marginTop: 8,
-                      padding: "10px 12px",
-                      borderRadius: 6,
-                      border: "1px solid var(--border-color)",
-                      background: "var(--bg-elevated)",
-                      fontSize: 12,
-                      fontFamily: "var(--font-ui)",
-                    }}
-                  >
-                    {allVisiblePassed && hiddenFailing.length === 0 ? (
-                      <div
-                        style={{
-                          color: "var(--color-success)",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 6,
-                        }}
-                      >
-                        <CheckCircle2 size={14} />
-                        All {hiddenPassed} hidden test cases passed.
-                      </div>
-                    ) : allVisiblePassed && hiddenFailing.length > 0 ? (
-                      <div
-                        style={{
-                          color: "var(--color-danger)",
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 6,
-                        }}
-                      >
-                        <AlertTriangle size={14} />
-                        You missed {hiddenFailed} hidden test case
-                        {hiddenFailed > 1 ? "s" : ""}.
-                      </div>
-                    ) : (
-                      <div style={{ color: "var(--text-muted)" }}>
-                        {hiddenPassed} hidden test case
-                        {hiddenPassed === 1 ? "" : "s"} passed, {hiddenFailed}{" "}
-                        hidden test case{hiddenFailed === 1 ? "" : "s"} failed.
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {hiddenToShow.map((tc) => (
-                  <TestCaseChip
-                    key={tc.testCase}
-                    testCase={tc.testCase}
-                    status={tc.status}
-                    executionTime={tc.executionTime}
-                    memoryUsed={tc.memoryUsed}
-                    output={tc.output}
-                    expectedOutput={tc.expectedOutput}
-                    error={tc.error || error}
-                    isHidden={true}
-                  />
-                ))}
+            {globalError && (
+              <details open={results.length === 0} style={{ marginBottom: 14, color: "var(--text-primary)" }}>
+                <summary style={{ cursor: "pointer", fontSize: 13, fontWeight: 600 }}>
+                  Error Details
+                </summary>
+                <CodeDataBox isError label="Execution Error" value={globalError} />
+              </details>
+            )}
+            {results.length === 0 && !globalError ? (
+              <div
+                style={{
+                  color: "var(--text-muted)",
+                  textAlign: "center",
+                  padding: 40,
+                  fontSize: 13,
+                }}
+              >
+                You must run your code first to see results.
               </div>
-            )}
+            ) : results.length === 0 && globalError ? (
+              <div style={{ color: "var(--color-danger)", display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+                <AlertTriangle size={16} />
+                {formatStatus(status)}
+              </div>
+            ) : activeTestCase ? (
+              // Results UI (LeetCode Style)
+              <div>
+                {/* Sub-tabs for each Test Case */}
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 8,
+                    marginBottom: 16,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  {displayedTestCases.map(({ testCase: tc, index: resultIndex }, index) => {
+                    const isPassedCase =
+                      tc.status === "PASSED" || tc.status === "ACCEPTED";
+                    return (
+                      <button
+                        key={resultIndex}
+                        onClick={() => setActiveTestCaseIndex(index)}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 6,
+                          padding: "6px 14px",
+                          borderRadius: 8,
+                          fontSize: 13,
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          background:
+                            activeTestCaseIndex === index
+                              ? "rgba(0,0,0,0.2)"
+                              : "transparent",
+                          border:
+                            activeTestCaseIndex === index
+                              ? "1px solid var(--border-color)"
+                              : "1px solid transparent",
+                          color:
+                            activeTestCaseIndex === index
+                              ? "var(--text-primary)"
+                              : "var(--text-muted)",
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: "50%",
+                            background:                             isPassedCase
+                              ? "var(--color-success)"
+                              : "var(--color-danger)",
+                          }}
+                        />
+                        {tc.isHidden ? "Hidden " : ""}
+                        Test case {tc.testCase ?? resultIndex + 1}
+                      </button>
+                    );
+                  })}
+                </div>
 
-            {activeTab === "output" && (
-              <pre
-                style={{
-                  margin: 0,
-                  color: "var(--text-code)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-all",
-                  lineHeight: 1.5,
-                  fontFamily: "var(--font-code)",
-                }}
-              >
-                {output || (
-                  <span style={{ color: "var(--text-muted)" }}>
-                    No output generated.
-                  </span>
-                )}
-              </pre>
-            )}
+                {/* Active Test Case Data */}
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  <div
+                    role="status"
+                    style={{
+                      color:
+                        activeTestCase.status === "PASSED" ||
+                        activeTestCase.status === "ACCEPTED"
+                          ? "var(--color-success)"
+                          : "var(--color-danger)",
+                      fontSize: 13,
+                      fontWeight: 600,
+                      marginBottom: 14,
+                    }}
+                  >
+                    {formatStatus(activeTestCase.status)}
+                    {activeTestCase.executionTime !== undefined &&
+                      ` · ${activeTestCase.executionTime} ms`}
+                  </div>
 
-            {activeTab === "error" && (
-              <pre
-                style={{
-                  margin: 0,
-                  color: "var(--color-danger)",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-all",
-                  lineHeight: 1.5,
-                  fontFamily: "var(--font-code)",
-                }}
-              >
-                {error || details || "No errors."}
-              </pre>
-            )}
+                  {activeTestCase.isHidden ? (
+                    <div style={{ color: "var(--text-muted)", fontSize: 13 }}>
+                      Hidden test-case details are not shown.
+                    </div>
+                  ) : (
+                    <>
+                      <CodeDataBox
+                        label={`Input · Test case ${activeTestCase.testCase ?? activeTestCaseEntry.index + 1}`}
+                        value={activeTestCase.input ?? activeTestCase.testCase}
+                      />
+
+                      <CodeDataBox
+                        isError={
+                          activeTestCase.status !== "PASSED" &&
+                          activeTestCase.status !== "ACCEPTED"
+                        }
+                        label="Actual Output"
+                        value={activeTestCase.output}
+                      />
+
+                      <CodeDataBox
+                        isSuccess={true}
+                        label="Expected Output"
+                        value={activeTestCase.expectedOutput}
+                      />
+                    </>
+                  )}
+
+                  {!activeTestCase.isHidden && activeTestCase.error && (
+                    <details style={{ marginTop: 8 }}>
+                      <summary style={{ cursor: "pointer", fontSize: 13, color: "var(--text-muted)" }}>
+                        Failure Reason
+                      </summary>
+                      <CodeDataBox isError label="Error" value={activeTestCase.error} />
+                    </details>
+                  )}
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       )}

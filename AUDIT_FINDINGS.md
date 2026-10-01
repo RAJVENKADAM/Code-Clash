@@ -24,7 +24,7 @@ This document tracks all findings from the comprehensive production readiness au
 ### Execution Engine
 - External service: `https://secure-code-engine.onrender.com/api/v1/execute`
 - Only Java is currently supported in Battle Rooms
-- Supports: Java, Python, C, C++ (in engine)
+- Supported submission language: Java
 
 ### Database
 - MongoDB collections: User, BattleRoom, BattleRoomSubmission, Challenge, Submission, etc.
@@ -447,4 +447,3 @@ This document tracks all findings from the comprehensive production readiness au
 7. Final audit
 
 ---
-

@@ -30,6 +30,10 @@ export default function useProctorGuard({ onDisqualified, enabled = true }) {
 
   const requestFullscreen = useCallback(async () => {
     if (!enabledRef.current) return;
+    if (document.fullscreenElement) {
+      setIsFullscreen(true);
+      return;
+    }
     try {
       if (document.documentElement.requestFullscreen) {
         await document.documentElement.requestFullscreen();
@@ -52,7 +56,7 @@ export default function useProctorGuard({ onDisqualified, enabled = true }) {
   }, []);
 
   useEffect(() => {
-    if (!enabledRef.current) return;
+    if (!enabled) return;
 
     const handleFullscreenChange = () => {
       const isFs = !!document.fullscreenElement;
@@ -171,10 +175,12 @@ export default function useProctorGuard({ onDisqualified, enabled = true }) {
       document.removeEventListener("selectstart", handleSelectStart, true);
       document.removeEventListener("keydown", handleKeyDown, true);
     };
-  }, [disqualify]);
+  }, [enabled, disqualify]);
 
   return {
-    isFullscreen,
+    isFullscreen:
+      isFullscreen ||
+      (typeof document !== "undefined" && !!document.fullscreenElement),
     warning,
     isDisqualified,
     requestFullscreen,

@@ -60,6 +60,7 @@ export function getStatusColor(status) {
     SYSTEM_ERROR: "#f85149",
     WRONG_ANSWER: "#da3633",
     COMPILE_ERROR: "#f85149",
+    COMPILATION_ERROR: "#f85149",
     RUNTIME_ERROR: "#da3633",
     TIME_LIMIT_EXCEEDED: "#d29922",
     MEMORY_LIMIT_EXCEEDED: "#d29922",
@@ -101,4 +102,3 @@ export function extractEmailName(email) {
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
     .join(" ");
 }
-

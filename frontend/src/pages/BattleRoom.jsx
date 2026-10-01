@@ -1,9 +1,10 @@
 import { useState, useCallback } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import { joinRoom, getMyRooms, getJoinedRooms, shareKey } from "../services/battleRoomService";
 import { formatDate } from "../utils/helpers";
 import RoomKeyModal from "../components/battleRoom/RoomKeyModal";
 import { Swords, PlusCircle, LogIn, Trophy, KeyRound, Loader2, Share2, Copy, Check } from "lucide-react";
+import { useAuth } from "../context/AuthContext";
 
 function CopyableCode({ code }) {
   const [copied, setCopied] = useState(false);
@@ -40,12 +41,13 @@ function CopyableCode({ code }) {
 
 export default function BattleRoom() {
   const navigate = useNavigate();
+  const location = useLocation();
+  const { user } = useAuth();
 
-  const [joinCode, setJoinCode] = useState("");
+  const [joinCode, setJoinCode] = useState(location.state?.joinRoomCode || "");
+  const [joinOrganization, setJoinOrganization] = useState("");
   const [joinError, setJoinError] = useState("");
   const [joining, setJoining] = useState(false);
-  const [participantName, setParticipantName] = useState("");
-  const [participantOrganization, setParticipantOrganization] = useState("");
   const [activeTab, setActiveTab] = useState("create-join");
   const [myRooms, setMyRooms] = useState([]);
   const [joinedRooms, setJoinedRooms] = useState([]);
@@ -55,25 +57,19 @@ export default function BattleRoom() {
   const [shareRoomCode, setShareRoomCode] = useState("");
 
   const handleJoin = async () => {
+    if (joinOrganization.trim().length < 2 || joinOrganization.trim().length > 120) {
+      setJoinError("Enter your organization (2-120 characters) before joining.");
+      return;
+    }
     if (!joinCode.trim()) {
       setJoinError("Please enter a room key.");
       return;
     }
 
-    setJoining(true);
     setJoinError("");
-
+    setJoining(true);
     try {
-      if (!participantName.trim() || !participantOrganization.trim()) {
-        setJoinError("Enter your name and organisation before joining.");
-        setJoining(false);
-        return;
-      }
-      localStorage.setItem("ccp_guest_name", participantName.trim());
-      await joinRoom(joinCode.trim().toUpperCase(), {
-        name: participantName.trim(),
-        organization: participantOrganization.trim(),
-      });
+      await joinRoom(joinCode.trim().toUpperCase(), joinOrganization.trim());
       navigate(`/battle-room/${joinCode.trim().toUpperCase()}/challenge`);
     } catch (err) {
       setJoinError(err.message || "Failed to join room. Check the key and try again.");
@@ -165,7 +161,7 @@ export default function BattleRoom() {
               Create New Battle
             </h2>
             <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 16, lineHeight: 1.5 }}>
-              Design your own challenges with custom test cases, choose languages, set a time limit, and generate a private room key for others to join.
+              Design your own Java challenges with custom test cases, set a time limit, and generate a private room key for others to join.
             </p>
             <Link
               to="/battle-room/create"
@@ -182,9 +178,33 @@ export default function BattleRoom() {
               Join Battle
             </h2>
             <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 12 }}>
-              Enter the room key shared by your instructor or friend to join the battle.
+              Enter the room key and your organization. Your verified account supplies your name and email; the organization you enter is recorded for this battle.
             </p>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12 }}>
+                Joining as <strong>{user?.name}</strong> · {user?.email}
+              </div>
+              <input
+                type="text"
+                value={joinOrganization}
+                onChange={(e) => {
+                  setJoinOrganization(e.target.value);
+                  setJoinError("");
+                }}
+                placeholder="Enter your organization"
+                maxLength={120}
+                autoComplete="organization"
+                required
+                style={{
+                  background: "var(--bg-card)",
+                  border: "1px solid var(--border-color)",
+                  borderRadius: 6,
+                  padding: "10px 12px",
+                  color: "var(--text-primary)",
+                  fontSize: 14,
+                  outline: "none",
+                }}
+              />
               <input
                 type="text"
                 value={joinCode}
@@ -205,22 +225,6 @@ export default function BattleRoom() {
                   outline: "none",
                 }}
                 onKeyDown={(e) => e.key === "Enter" && handleJoin()}
-              />
-              <input
-                type="text"
-                value={participantName}
-                onChange={(e) => setParticipantName(e.target.value)}
-                placeholder="Your full name (shown on certificate)"
-                maxLength={100}
-                style={{ background: "var(--bg-card)", border: "1px solid var(--border-color)", borderRadius: 6, padding: "10px 12px", color: "var(--text-primary)", fontSize: 13, outline: "none" }}
-              />
-              <input
-                type="text"
-                value={participantOrganization}
-                onChange={(e) => setParticipantOrganization(e.target.value)}
-                placeholder="Organisation (used for leaderboard)"
-                maxLength={120}
-                style={{ background: "var(--bg-card)", border: "1px solid var(--border-color)", borderRadius: 6, padding: "10px 12px", color: "var(--text-primary)", fontSize: 13, outline: "none" }}
               />
               {joinError && (
                 <div style={{ color: "var(--color-danger)", fontSize: 12, fontFamily: "var(--font-ui)" }}>

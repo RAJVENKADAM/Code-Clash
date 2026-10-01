@@ -89,7 +89,29 @@ export default function ProblemDescription({ challenge }) {
     { key: "submissions", label: "Submissions", icon: BarChart3 },
   ];
 
-  const testCases = challenge.visibleTestCases || challenge.testCases || [];
+  const testCases = challenge.visibleTestCases?.length
+    ? challenge.visibleTestCases
+    : challenge.testCases || [];
+  const sampleCases = [
+    ...(challenge.examples || []).map((example) => ({
+      input: example.input,
+      output: example.output,
+      explanation: example.explanation,
+    })),
+    ...testCases.map((testCase) => ({
+      input: testCase.input,
+      output: testCase.output ?? testCase.expectedOutput,
+      explanation: testCase.explanation,
+    })),
+  ].filter(
+    (sample, index, samples) =>
+      sample.input !== undefined &&
+      sample.output !== undefined &&
+      samples.findIndex(
+        (candidate) =>
+          candidate.input === sample.input && candidate.output === sample.output,
+      ) === index,
+  );
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -184,66 +206,79 @@ export default function ProblemDescription({ challenge }) {
             </Section>
 
             {/* Examples shown below description */}
-            {challenge.examples && challenge.examples.length > 0 && (
+            {sampleCases.length > 0 && (
               <Section
-                title={`Examples (${challenge.examples.length})`}
+                title={`Sample Test Cases (${sampleCases.length})`}
                 icon={ListOrdered}
                 defaultOpen
               >
-                {challenge.examples.map((ex, idx) => (
+                {sampleCases.map((sample, idx) => (
                   <div
                     key={idx}
                     style={{
-                      background: "var(--bg-card)",
-                      border: "1px solid var(--border-color)",
-                      borderRadius: 6,
-                      padding: 12,
+                      background: "rgba(110, 118, 129, 0.12)",
+                      border: "1px solid rgba(110, 118, 129, 0.25)",
+                      borderRadius: 8,
+                      padding: 14,
                       marginBottom: 10,
-                      fontFamily: "var(--font-code)",
-                      fontSize: 13,
                     }}
                   >
                     <div
                       style={{
                         color: "var(--text-primary)",
                         fontWeight: 600,
-                        marginBottom: 6,
+                        fontSize: 13,
+                        marginBottom: 10,
                       }}
                     >
-                      Example {idx + 1}
+                      Sample {idx + 1}
                     </div>
-                    <div
-                      style={{ color: "var(--text-muted)", marginBottom: 4 }}
-                    >
-                      <span style={{ color: "var(--text-faint)" }}>
-                        Input:{" "}
-                      </span>
-                      <span style={{ color: "var(--syntax-string)" }}>
-                        {ex.input}
-                      </span>
-                    </div>
-                    <div
-                      style={{ color: "var(--text-muted)", marginBottom: 4 }}
-                    >
-                      <span style={{ color: "var(--text-faint)" }}>
-                        Output:{" "}
-                      </span>
-                      <span style={{ color: "var(--syntax-keyword)" }}>
-                        {ex.output}
-                      </span>
-                    </div>
-                    {ex.explanation && (
+                    {[
+                      ["Sample Input", sample.input],
+                      ["Sample Output", sample.output],
+                    ].map(([label, value]) => (
+                      <div key={label} style={{ marginBottom: 8 }}>
+                        <div
+                          style={{
+                            color: "var(--text-secondary)",
+                            fontSize: 12,
+                            fontWeight: 600,
+                            marginBottom: 5,
+                          }}
+                        >
+                          {label}
+                        </div>
+                        <pre
+                          style={{
+                            color: "var(--text-primary)",
+                            background: "rgba(0, 0, 0, 0.12)",
+                            borderRadius: 5,
+                            padding: "9px 11px",
+                            margin: 0,
+                            fontFamily: "var(--font-code)",
+                            fontSize: 12,
+                            lineHeight: 1.5,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                          }}
+                        >
+                          {value}
+                        </pre>
+                      </div>
+                    ))}
+                    {sample.explanation && (
                       <div
                         style={{
                           color: "var(--text-muted)",
-                          marginTop: 6,
+                          marginTop: 10,
+                          fontSize: 12,
                           fontFamily: "var(--font-ui)",
                         }}
                       >
                         <span style={{ color: "var(--text-faint)" }}>
                           Explanation:{" "}
                         </span>
-                        {ex.explanation}
+                        {sample.explanation}
                       </div>
                     )}
                   </div>

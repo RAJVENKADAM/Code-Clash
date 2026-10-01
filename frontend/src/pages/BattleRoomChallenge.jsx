@@ -17,7 +17,6 @@ import RoomKeyModal from "../components/battleRoom/RoomKeyModal";
 import {
   DIFFICULTY_COLORS,
   LANGUAGE_BY_ID,
-  SUPPORTED_LANGUAGES,
 } from "../utils/constants";
 import {
   Swords,
@@ -32,15 +31,15 @@ import {
   KeyRound,
   AlertTriangle,
   Code2,
-  ChevronDown,
-  ChevronUp,
 } from "lucide-react";
 
 function RoomTimer({ endTime, onTimeUp }) {
   const [timeLeft, setTimeLeft] = useState(0);
+  const timeUpCalledRef = useRef(false);
 
   useEffect(() => {
     if (!endTime) return;
+    timeUpCalledRef.current = false;
 
     const updateTimer = () => {
       const now = new Date();
@@ -48,7 +47,8 @@ function RoomTimer({ endTime, onTimeUp }) {
       const diff = Math.max(0, Math.floor((end - now) / 1000));
       setTimeLeft(diff);
 
-      if (diff <= 0) {
+      if (diff <= 0 && !timeUpCalledRef.current) {
+        timeUpCalledRef.current = true;
         onTimeUp();
       }
     };
@@ -87,6 +87,49 @@ function RoomTimer({ endTime, onTimeUp }) {
   );
 }
 
+function getQuestionStarter(question) {
+  const starterByLang = question?.starterCodeByLanguage || {};
+  const languageDefault = LANGUAGE_BY_ID.java;
+  return (
+    starterByLang.java ||
+    languageDefault.defaultStarter ||
+    question?.starterCode ||
+    ""
+  );
+}
+
+function readRoomEditorCache(roomCode) {
+  try {
+    const saved = JSON.parse(
+      sessionStorage.getItem(`battle-room-editor:${roomCode}`) || "{}",
+    );
+    return {
+      codeByQuestion:
+        saved.codeByQuestion && typeof saved.codeByQuestion === "object"
+          ? saved.codeByQuestion
+          : {},
+      resultByQuestion:
+        saved.resultByQuestion && typeof saved.resultByQuestion === "object"
+          ? saved.resultByQuestion
+          : {},
+    };
+  } catch (error) {
+    console.warn("Unable to restore battle editor draft:", error.message);
+    return { codeByQuestion: {}, resultByQuestion: {} };
+  }
+}
+
+function saveRoomEditorCache(roomCode, codeByQuestion, resultByQuestion) {
+  try {
+    sessionStorage.setItem(
+      `battle-room-editor:${roomCode}`,
+      JSON.stringify({ codeByQuestion, resultByQuestion }),
+    );
+  } catch (error) {
+    console.warn("Unable to save battle editor draft:", error.message);
+  }
+}
+
 export default function BattleRoomChallenge() {
   const { roomCode } = useParams();
   const navigate = useNavigate();
@@ -94,7 +137,7 @@ export default function BattleRoomChallenge() {
   const [room, setRoom] = useState(null);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [code, setCode] = useState("");
-  const [selectedLanguage, setSelectedLanguage] = useState("java");
+  const selectedLanguage = "java";
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -108,9 +151,9 @@ export default function BattleRoomChallenge() {
   const [proctorEnabled, setProctorEnabled] = useState(false);
   const [showKeyModal, setShowKeyModal] = useState(false);
   const [roomKey, setRoomKey] = useState("");
+  const [creatorOrganization, setCreatorOrganization] = useState("");
   const [questionsVisible, setQuestionsVisible] = useState(false);
   const [windowState, setWindowState] = useState(null);
-  const [openTestCases, setOpenTestCases] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(true);
   const [expandedQuestion, setExpandedQuestion] = useState(-1);
 
@@ -121,27 +164,13 @@ export default function BattleRoomChallenge() {
   const draggingLeftRef = useRef(false);
   const draggingConsoleRef = useRef(false);
 
-  // Per-language code memory
-  const codeByLanguageRef = useRef({});
+  const draftRoomCodeRef = useRef(null);
+  const codeByQuestionRef = useRef({});
+  const resultByQuestionRef = useRef({});
+  const activeQuestionIdRef = useRef(null);
   const startTimeRef = useRef(null);
 
-  useEffect(() => {
-    fetchRoom();
-  }, [roomCode]);
-
-  // Auto-refresh while the participant is waiting for the scheduled window to
-  // open (or is on the not-started screen) so they unlock without a manual
-  // reload. The backend remains authoritative; this is purely a UX convenience.
-  useEffect(() => {
-    if (windowState && windowState !== "NOT_STARTED") return;
-    if (!room || isCreator) return;
-    const id = setInterval(() => {
-      fetchRoom();
-    }, 30000);
-    return () => clearInterval(id);
-  }, [windowState, room, isCreator]);
-
-  async function fetchRoom() {
+  const fetchRoom = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
@@ -158,34 +187,42 @@ export default function BattleRoomChallenge() {
         })),
       );
 
-      // Only c/cpp/java/python
-      const roomLangs = data.room.languages || ["all"];
-      const supportedAllowed = roomLangs.includes("all")
-        ? Object.keys(LANGUAGE_BY_ID)
-        : roomLangs.filter((langId) => LANGUAGE_BY_ID[langId]);
-      const allowedId = supportedAllowed[0] || "java";
-      setSelectedLanguage(allowedId);
+      const isNewRoom = draftRoomCodeRef.current !== roomCode;
+      if (isNewRoom) {
+        draftRoomCodeRef.current = roomCode;
+        const savedCache = readRoomEditorCache(roomCode);
+        codeByQuestionRef.current = savedCache.codeByQuestion;
+        resultByQuestionRef.current = savedCache.resultByQuestion;
+        activeQuestionIdRef.current = null;
+        setCurrentResult(null);
+      }
 
-      const q = data.room.questions && data.room.questions[0];
+      const questions = data.room.questions || [];
+      const nextQuestionIndex = isNewRoom
+        ? 0
+        : Math.min(currentQuestionIndex, Math.max(questions.length - 1, 0));
+      const q = questions[nextQuestionIndex];
       if (q) {
-        const starterByLang = q.starterCodeByLanguage || {};
-        const langDef = LANGUAGE_BY_ID[allowedId] || LANGUAGE_BY_ID.python;
-        const starter =
-          starterByLang[allowedId] ||
-          langDef.defaultStarter ||
-          q.starterCode ||
-          "";
-        setCode(starter);
-        codeByLanguageRef.current[allowedId] = starter;
-        setCurrentQuestionIndex(0);
+        const starter = getQuestionStarter(q);
+        const restoredCode = codeByQuestionRef.current[q._id] ?? starter;
+        codeByQuestionRef.current[q._id] = restoredCode;
+        activeQuestionIdRef.current = q._id;
+        setCode(restoredCode);
+        setCurrentQuestionIndex(nextQuestionIndex);
+        const cachedResult = resultByQuestionRef.current[q._id];
+        setCurrentResult(
+          cachedResult?.code === restoredCode ? cachedResult.result : null,
+        );
       }
 
-      // Only the creator sees the manual "start battle" prompt for their own
-      // unscheduled room. A participant blocked by the schedule must never see
-      // the start prompt — they get the dedicated pre-start / ended screens.
-      if (data.room.status === "UPCOMING" && data.isCreator) {
-        setShowStartPrompt(true);
-      }
+      const hasScheduledWindow = Boolean(
+        data.room.scheduledDate && data.room.scheduledStartTime,
+      );
+      setShowStartPrompt(
+        data.room.status === "UPCOMING" &&
+          data.isCreator &&
+          !hasScheduledWindow,
+      );
 
       if (data.userSubmission && data.userSubmission.status === "COMPLETED") {
         setSubmitted(true);
@@ -218,11 +255,34 @@ export default function BattleRoomChallenge() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [roomCode, currentQuestionIndex]);
+
+  useEffect(() => {
+    fetchRoom();
+  }, [fetchRoom]);
+
+  // Auto-refresh while the participant is waiting for the scheduled window to
+  // open (or is on the not-started screen) so they unlock without a manual
+  // reload. The backend remains authoritative; this is purely a UX convenience.
+  useEffect(() => {
+    if (windowState && windowState !== "NOT_STARTED") return;
+    if (!room || isCreator) return;
+    const id = setInterval(() => {
+      fetchRoom();
+    }, 30000);
+    return () => clearInterval(id);
+  }, [windowState, room, isCreator, fetchRoom]);
 
   const handleStartRoom = async () => {
+    if (
+      creatorOrganization.trim().length < 2 ||
+      creatorOrganization.trim().length > 120
+    ) {
+      setError("Enter your organization (2-120 characters) before starting.");
+      return;
+    }
     try {
-      await startRoom(roomCode);
+      await startRoom(roomCode, creatorOrganization.trim());
       const data = await getRoomByCode(roomCode);
       setRoom(data.room);
       setQuestionsVisible(!!data.questionsVisible);
@@ -276,43 +336,37 @@ export default function BattleRoomChallenge() {
     }
     setCurrentQuestionIndex(index);
     const q = room.questions[index];
-    const savedCode = codeByLanguageRef.current[selectedLanguage];
-    if (savedCode) {
-      setCode(savedCode);
-    } else {
-      const starterByLang = q.starterCodeByLanguage || {};
-      const langDef = LANGUAGE_BY_ID[selectedLanguage] || LANGUAGE_BY_ID.python;
-      setCode(
-        starterByLang[selectedLanguage] ||
-          langDef.defaultStarter ||
-          q.starterCode ||
-          "",
-      );
-    }
-    setCurrentResult(null);
+    if (!q) return;
+    activeQuestionIdRef.current = q._id;
+    const restoredCode = codeByQuestionRef.current[q._id] ?? getQuestionStarter(q);
+    codeByQuestionRef.current[q._id] = restoredCode;
+    setCode(restoredCode);
+    const cachedResult = resultByQuestionRef.current[q._id];
+    setCurrentResult(
+      cachedResult?.code === restoredCode ? cachedResult.result : null,
+    );
+    saveRoomEditorCache(
+      roomCode,
+      codeByQuestionRef.current,
+      resultByQuestionRef.current,
+    );
   };
 
-  const handleLanguageChange = (langId) => {
-    if (submitted) return;
-    const q = room.questions[currentQuestionIndex];
+  const handleCodeChange = (nextCode) => {
+    setCode(nextCode);
+    const question = room?.questions?.[currentQuestionIndex];
+    if (!question) return;
 
-    if (selectedLanguage) {
-      codeByLanguageRef.current[selectedLanguage] = code;
-    }
-
-    setSelectedLanguage(langId);
-
-    const saved = codeByLanguageRef.current[langId];
-    if (saved) {
-      setCode(saved);
-    } else {
-      const starterByLang = q?.starterCodeByLanguage || {};
-      const langDef = LANGUAGE_BY_ID[langId] || LANGUAGE_BY_ID.java;
-      setCode(
-        starterByLang[langId] || langDef.defaultStarter || q?.starterCode || "",
-      );
-    }
-    setCurrentResult(null);
+    codeByQuestionRef.current[question._id] = nextCode;
+    const cachedResult = resultByQuestionRef.current[question._id];
+    setCurrentResult(
+      cachedResult?.code === nextCode ? cachedResult.result : null,
+    );
+    saveRoomEditorCache(
+      roomCode,
+      codeByQuestionRef.current,
+      resultByQuestionRef.current,
+    );
   };
 
   const handleSubmit = async () => {
@@ -340,40 +394,55 @@ export default function BattleRoomChallenge() {
         failed: qr.failed || 0,
         total: qr.total || 0,
         score: qr.score || 0,
-        output: qr.output || "",
-        error: qr.error || "",
-        executionTime: qr.executionTime || 0,
-        memoryUsed: qr.memoryUsed || 0,
+        output: qr.output ?? "",
+        error: qr.error ?? "",
+        executionTime: qr.executionTime ?? 0,
+        memoryUsed: qr.memoryUsed ?? 0,
         visiblePassed:
           qr.visiblePassed ??
-          (qr.results || []).filter((r) => !r.isHidden && r.status === "PASSED")
+          (qr.results || []).filter((r) => !r.isHidden && ["PASSED", "ACCEPTED"].includes(r.status))
             .length,
         visibleFailed:
           qr.visibleFailed ??
-          (qr.results || []).filter((r) => !r.isHidden && r.status !== "PASSED")
+          (qr.results || []).filter((r) => !r.isHidden && !["PASSED", "ACCEPTED"].includes(r.status))
             .length,
         hiddenCount:
           qr.hiddenCount ?? (qr.results || []).filter((r) => r.isHidden).length,
         hiddenPassed:
           qr.hiddenPassed ??
-          (qr.results || []).filter((r) => r.isHidden && r.status === "PASSED")
+          (qr.results || []).filter((r) => r.isHidden && ["PASSED", "ACCEPTED"].includes(r.status))
             .length,
         hiddenFailed:
           qr.hiddenFailed ??
-          (qr.results || []).filter((r) => r.isHidden && r.status !== "PASSED")
+          (qr.results || []).filter((r) => r.isHidden && !["PASSED", "ACCEPTED"].includes(r.status))
             .length,
         results: (qr.results || []).map((r) => ({
+          testCaseId: r.testCaseId,
           testCase: r.testCase,
           status: r.status,
-          executionTime: r.executionTime || 0,
-          memoryUsed: r.memoryUsed || 0,
-          output: r.output || "",
-          expectedOutput: r.expectedOutput || "",
+          input: r.input ?? "",
+          executionTime: r.executionTime ?? 0,
+          memoryUsed: r.memoryUsed ?? 0,
+          output: r.output ?? "",
+          expectedOutput: r.expectedOutput ?? "",
+          error: r.error ?? "",
           isHidden: !!r.isHidden,
         })),
       };
 
-      setCurrentResult(submitResult);
+      codeByQuestionRef.current[question._id] = code;
+      resultByQuestionRef.current[question._id] = {
+        code,
+        result: submitResult,
+      };
+      saveRoomEditorCache(
+        roomCode,
+        codeByQuestionRef.current,
+        resultByQuestionRef.current,
+      );
+      if (activeQuestionIdRef.current === question._id) {
+        setCurrentResult(submitResult);
+      }
       setConsoleHeight((prev) => prev);
 
       const updated = [...questionResults];
@@ -388,7 +457,7 @@ export default function BattleRoomChallenge() {
         setSubmitted(true);
       }
     } catch (err) {
-      setCurrentResult({
+      const failedResult = {
         status: "SYSTEM_ERROR",
         accepted: false,
         passed: 0,
@@ -399,7 +468,17 @@ export default function BattleRoomChallenge() {
         executionTime: 0,
         memoryUsed: 0,
         results: [],
-      });
+      };
+      codeByQuestionRef.current[question._id] = code;
+      resultByQuestionRef.current[question._id] = { code, result: failedResult };
+      saveRoomEditorCache(
+        roomCode,
+        codeByQuestionRef.current,
+        resultByQuestionRef.current,
+      );
+      if (activeQuestionIdRef.current === question._id) {
+        setCurrentResult(failedResult);
+      }
       setError(err.message || "Failed to submit solution.");
     } finally {
       setSubmitting(false);
@@ -450,42 +529,57 @@ export default function BattleRoomChallenge() {
         passed: result.passed || 0,
         failed: result.failed || 0,
         total: result.total || 0,
-        output: result.output || "",
-        error: result.error || "",
-        executionTime: result.executionTime || 0,
-        memoryUsed: result.memoryUsed || 0,
+        output: result.output ?? "",
+        error: result.error ?? "",
+        executionTime: result.executionTime ?? 0,
+        memoryUsed: result.memoryUsed ?? 0,
         visiblePassed:
           result.visiblePassed ??
           (result.results || []).filter(
-            (r) => !r.isHidden && r.status === "PASSED",
+            (r) => !r.isHidden && ["PASSED", "ACCEPTED"].includes(r.status),
           ).length,
         visibleFailed:
           result.visibleFailed ??
           (result.results || []).filter(
-            (r) => !r.isHidden && r.status !== "PASSED",
+            (r) => !r.isHidden && !["PASSED", "ACCEPTED"].includes(r.status),
           ).length,
         hiddenCount: (result.results || []).filter((r) => r.isHidden).length,
         hiddenPassed: (result.results || []).filter(
-          (r) => r.isHidden && r.status === "PASSED",
+          (r) => r.isHidden && ["PASSED", "ACCEPTED"].includes(r.status),
         ).length,
         hiddenFailed: (result.results || []).filter(
-          (r) => r.isHidden && r.status !== "PASSED",
+          (r) => r.isHidden && !["PASSED", "ACCEPTED"].includes(r.status),
         ).length,
         results: (result.results || []).map((r) => ({
+          testCaseId: r.testCaseId,
           testCase: r.testCase,
           status: r.status,
-          executionTime: r.executionTime || 0,
-          memoryUsed: r.memoryUsed || 0,
-          output: r.output || "",
-          expectedOutput: r.expectedOutput || "",
+          input: r.input ?? "",
+          executionTime: r.executionTime ?? 0,
+          memoryUsed: r.memoryUsed ?? 0,
+          output: r.output ?? "",
+          expectedOutput: r.expectedOutput ?? "",
+          error: r.error ?? "",
           isHidden: !!r.isHidden,
         })),
       };
 
-      setCurrentResult(runResult);
+      codeByQuestionRef.current[question._id] = code;
+      resultByQuestionRef.current[question._id] = {
+        code,
+        result: runResult,
+      };
+      saveRoomEditorCache(
+        roomCode,
+        codeByQuestionRef.current,
+        resultByQuestionRef.current,
+      );
+      if (activeQuestionIdRef.current === question._id) {
+        setCurrentResult(runResult);
+      }
       setConsoleHeight((prev) => prev);
     } catch (err) {
-      setCurrentResult({
+      const failedResult = {
         status: "SYSTEM_ERROR",
         accepted: false,
         passed: 0,
@@ -496,7 +590,17 @@ export default function BattleRoomChallenge() {
         executionTime: 0,
         memoryUsed: 0,
         results: [],
-      });
+      };
+      codeByQuestionRef.current[question._id] = code;
+      resultByQuestionRef.current[question._id] = { code, result: failedResult };
+      saveRoomEditorCache(
+        roomCode,
+        codeByQuestionRef.current,
+        resultByQuestionRef.current,
+      );
+      if (activeQuestionIdRef.current === question._id) {
+        setCurrentResult(failedResult);
+      }
       setError(err.message || "Failed to run code.");
     } finally {
       setRunning(false);
@@ -545,15 +649,6 @@ export default function BattleRoomChallenge() {
     document.body.style.userSelect = "none";
   };
 
-  const getAllowedLanguages = () => {
-    if (!room) return [];
-    const roomLangs = room.languages || ["java"];
-    if (roomLangs.includes("all")) {
-      return SUPPORTED_LANGUAGES;
-    }
-    return SUPPORTED_LANGUAGES.filter((l) => roomLangs.includes(l.id));
-  };
-
   const handleShowRoomKey = async () => {
     try {
       const data = await shareKey(roomCode);
@@ -563,6 +658,16 @@ export default function BattleRoomChallenge() {
       setError(err.message || "Failed to get room key.");
     }
   };
+
+  const hasScheduledWindow = Boolean(
+    room?.scheduledDate && room?.scheduledStartTime && room?.scheduledEndTime,
+  );
+  const formatScheduledWindowTime = (value) =>
+    new Intl.DateTimeFormat(undefined, {
+      timeZone: room?.timezone || "UTC",
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(new Date(value));
 
   if (loading) {
     return (
@@ -615,6 +720,16 @@ export default function BattleRoomChallenge() {
         }}
       >
         <p style={{ color: "var(--color-danger)", fontSize: 14 }}>{error}</p>
+        {error.includes("organization before accessing") && (
+          <button
+            className="btn-primary"
+            onClick={() =>
+              navigate("/battle-room", { state: { joinRoomCode: roomCode } })
+            }
+          >
+            Enter organization and join
+          </button>
+        )}
         <button onClick={fetchRoom} className="btn-secondary">
           Retry
         </button>
@@ -623,7 +738,6 @@ export default function BattleRoomChallenge() {
   }
 
   if (showStartPrompt && room) {
-    const allowedLangs = room.languages || ["all"];
     return (
       <div
         style={{
@@ -711,8 +825,10 @@ export default function BattleRoomChallenge() {
                 gap: 4,
               }}
             >
-              <Timer size={12} /> {room.timeLimit}{" "}
-              {room.timeLimitUnit || "minutes"}
+              <Timer size={12} />
+              {hasScheduledWindow
+                ? `${formatScheduledWindowTime(room.startTime)} – ${formatScheduledWindowTime(room.endTime)}`
+                : `${room.timeLimit} ${room.timeLimitUnit || "minutes"}`}
             </span>
             <span
               style={{
@@ -728,10 +844,7 @@ export default function BattleRoomChallenge() {
                 gap: 4,
               }}
             >
-              <Code2 size={12} />{" "}
-              {allowedLangs.includes("all")
-                ? "All Languages"
-                : allowedLangs.join(", ")}
+              <Code2 size={12} /> Java
             </span>
           </div>
           <p
@@ -750,13 +863,45 @@ export default function BattleRoomChallenge() {
             </strong>
           </p>
           {isCreator ? (
-            <button
-              onClick={handleStartRoom}
-              className="btn-primary"
-              style={{ padding: "12px 32px" }}
-            >
-              <Play size={16} /> Start Battle Now
-            </button>
+            <div style={{ display: "grid", gap: 10, justifyItems: "center" }}>
+              <label
+                style={{
+                  color: "var(--text-secondary)",
+                  fontSize: 12,
+                  textAlign: "left",
+                  width: "min(100%, 320px)",
+                }}
+              >
+                Your organization (required to participate)
+                <input
+                  value={creatorOrganization}
+                  onChange={(event) => {
+                    setCreatorOrganization(event.target.value);
+                    setError("");
+                  }}
+                  autoComplete="organization"
+                  maxLength={120}
+                  required
+                  style={{
+                    width: "100%",
+                    boxSizing: "border-box",
+                    marginTop: 6,
+                    background: "var(--bg-card)",
+                    border: "1px solid var(--border-color)",
+                    borderRadius: 6,
+                    padding: "10px 12px",
+                    color: "var(--text-primary)",
+                  }}
+                />
+              </label>
+              <button
+                onClick={handleStartRoom}
+                className="btn-primary"
+                style={{ padding: "12px 32px" }}
+              >
+                <Play size={16} /> Start Battle Now
+              </button>
+            </div>
           ) : (
             <div>
               <p
@@ -939,10 +1084,7 @@ export default function BattleRoomChallenge() {
   const question = room.questions?.[currentQuestionIndex];
   const currentQResult = questionResults[currentQuestionIndex];
   const isQuestionSubmitted = currentQResult?.status !== "PENDING";
-  const allowedLangs = getAllowedLanguages();
-  const currentLangDef =
-    LANGUAGE_BY_ID[selectedLanguage] || LANGUAGE_BY_ID.python;
-
+  const currentLangDef = LANGUAGE_BY_ID.java;
   return (
     <div
       style={{
@@ -1465,100 +1607,6 @@ export default function BattleRoomChallenge() {
                   </div>
                 )}
 
-                {question?.visibleTestCases &&
-                  question.visibleTestCases.filter((tc) => tc.input).length >
-                    0 && (
-                    <div style={{ marginBottom: 12 }}>
-                      <div
-                        onClick={() => setOpenTestCases(!openTestCases)}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          cursor: "pointer",
-                          userSelect: "none",
-                          color: "var(--text-muted)",
-                          fontSize: 10,
-                          fontFamily: "var(--font-ui)",
-                          textTransform: "uppercase",
-                          letterSpacing: "0.5px",
-                          marginBottom: 6,
-                        }}
-                      >
-                        <span>Test Cases (showing up to 3)</span>
-                        {openTestCases ? (
-                          <ChevronUp size={13} />
-                        ) : (
-                          <ChevronDown size={13} />
-                        )}
-                      </div>
-                      {openTestCases && (
-                        <div>
-                          {question.visibleTestCases
-                            .filter((tc) => tc.input)
-                            .slice(0, 3)
-                            .map((tc, idx) => (
-                              <div
-                                key={idx}
-                                style={{
-                                  background: "var(--bg-elevated)",
-                                  border: "1px solid var(--border-color)",
-                                  borderRadius: 6,
-                                  padding: "6px 10px",
-                                  marginBottom: 4,
-                                  fontSize: 12,
-                                  fontFamily: "var(--font-code)",
-                                }}
-                              >
-                                <div style={{ color: "var(--text-muted)" }}>
-                                  Input:{" "}
-                                  <span
-                                    style={{ color: "var(--text-primary)" }}
-                                  >
-                                    {tc.input}
-                                  </span>
-                                </div>
-                                <div style={{ color: "var(--text-muted)" }}>
-                                  Output:{" "}
-                                  <span
-                                    style={{ color: "var(--text-primary)" }}
-                                  >
-                                    {tc.expectedOutput}
-                                  </span>
-                                </div>
-                                {tc.description && (
-                                  <div
-                                    style={{
-                                      color: "var(--text-muted)",
-                                      fontFamily: "var(--font-ui)",
-                                    }}
-                                  >
-                                    {tc.description}
-                                  </div>
-                                )}
-                              </div>
-                            ))}
-                          {question.visibleTestCases.filter((tc) => tc.input)
-                            .length > 3 && (
-                            <div
-                              style={{
-                                color: "var(--text-muted)",
-                                fontSize: 10,
-                                fontFamily: "var(--font-ui)",
-                                marginTop: 4,
-                              }}
-                            >
-                              +{" "}
-                              {question.visibleTestCases.filter(
-                                (tc) => tc.input,
-                              ).length - 3}{" "}
-                              more visible test cases (hidden)
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
               </div>
             )}
           </div>
@@ -1603,33 +1651,10 @@ export default function BattleRoomChallenge() {
                   fontFamily: "var(--font-code)",
                 }}
               >
-                {currentLangDef?.label || selectedLanguage}{" "}
-                {currentLangDef?.extension || ".py"} • Question{" "}
+                {currentLangDef.label} {currentLangDef.extension} • Question{" "}
                 {currentQuestionIndex + 1}
               </span>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <select
-                  value={selectedLanguage}
-                  onChange={(e) => handleLanguageChange(e.target.value)}
-                  disabled={submitted}
-                  style={{
-                    background: "var(--bg-card)",
-                    border: "1px solid var(--border-color)",
-                    borderRadius: 6,
-                    padding: "6px 10px",
-                    color: "var(--text-primary)",
-                    fontSize: 12,
-                    fontFamily: "var(--font-ui)",
-                    cursor: "pointer",
-                    outline: "none",
-                  }}
-                >
-                  {allowedLangs.map((lang) => (
-                    <option key={lang.id} value={lang.id}>
-                      {lang.label}
-                    </option>
-                  ))}
-                </select>
                 {isQuestionSubmitted && (
                   <span
                     style={{
@@ -1704,7 +1729,7 @@ export default function BattleRoomChallenge() {
             >
               <CodeEditorSandbox
                 value={code}
-                onChange={setCode}
+                onChange={handleCodeChange}
                 readOnly={isQuestionSubmitted || submitted}
                 language={selectedLanguage}
                 height="100%"

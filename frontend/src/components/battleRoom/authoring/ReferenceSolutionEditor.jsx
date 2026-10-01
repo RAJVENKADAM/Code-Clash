@@ -39,18 +39,11 @@ export default function ReferenceSolutionEditor({
   onChange,
   onOutputsGenerated,
 }) {
-  const [language, setLanguage] = useState(question.referenceSolutionLanguage || AUTHORING_LANGUAGES[0].id);
+  const language = AUTHORING_LANGUAGES[0].id;
   const [code, setCode] = useState(question.referenceSolution || "");
   const [generating, setGenerating] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
-
-  const handleLanguageChange = (langId) => {
-    setLanguage(langId);
-    if (onChange) {
-      onChange({ ...question, referenceSolutionLanguage: langId, referenceSolution: code });
-    }
-  };
 
   const handleCodeChange = (val) => {
     setCode(val);
@@ -119,26 +112,14 @@ const hasParams = (tc) =>
           Reference Solution (correct answer)
         </label>
         <p style={{ color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-ui)", margin: "0 0 6px" }}>
-          One correct solution in any supported language. The backend runs it against every
+          Provide a correct Java solution. The backend runs it against every
           visible + hidden input to generate expected outputs and stores only the outputs.
         </p>
-
-        <div style={{ marginBottom: 8 }}>
-          <select
-            value={language}
-            onChange={(e) => handleLanguageChange(e.target.value)}
-            style={{ ...inputStyle, cursor: "pointer", maxWidth: 200, fontFamily: "var(--font-ui)" }}
-          >
-            {AUTHORING_LANGUAGES.map((l) => (
-              <option key={l.id} value={l.id}>{l.label}</option>
-            ))}
-          </select>
-        </div>
 
         <textarea
           value={code}
           onChange={(e) => handleCodeChange(e.target.value)}
-          placeholder={`Paste the complete correct solution here.\n\nExample (Python):\nclass Solution:\n    def twoSum(self, nums, target):\n        seen = {}\n        for i, n in enumerate(nums):\n            if target - n in seen:\n                return [seen[target - n], i]\n            seen[n] = i\n        return []`}
+          placeholder={`Paste the complete correct Java solution here.\n\nExample:\nclass Solution {\n    public int[] twoSum(int[] nums, int target) {\n        return new int[]{};\n    }\n}`}
           rows={14}
           style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6, background: "var(--bg-elevated)" }}
         />
@@ -177,4 +158,3 @@ const hasParams = (tc) =>
     </div>
   );
 }
-

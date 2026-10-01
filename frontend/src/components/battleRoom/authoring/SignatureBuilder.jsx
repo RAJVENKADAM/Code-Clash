@@ -3,7 +3,6 @@ import { Braces, PlusCircle, Trash2, Wand2, Loader2, FunctionSquare } from "luci
 import {
   RETURN_TYPE_GROUPS,
   PARAMETER_TYPE_GROUPS,
-  AUTHORING_LANGUAGES,
   PROBLEM_TYPES,
 } from "../../../utils/constants";
 import { generateSignature, generateStarterCode } from "../../../services/battleRoomService";
@@ -63,8 +62,7 @@ const TypeSelect = ({ groups, value, onChange, placeholder }) => (
  *   - Return type (dropdown with grouped supported types)
  *   - Parameters (dynamic builder: name + type per parameter)
  *
- * The backend generates the canonical signature and per-language signature
- * previews (Java / Python / C++ / C) automatically.
+ * The backend generates the canonical Java signature and starter code.
  */
 export default function SignatureBuilder({
   functionName,
@@ -77,12 +75,14 @@ export default function SignatureBuilder({
   onChange,
   onSignatureGenerated,
 }) {
-  const [previewLang, setPreviewLang] = useState(AUTHORING_LANGUAGES[0].id);
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState("");
   const [starterPreview, setStarterPreview] = useState("");
 
-  const paramsList = Array.isArray(parameters) ? parameters : [];
+  const paramsList = useMemo(
+    () => (Array.isArray(parameters) ? parameters : []),
+    [parameters],
+  );
 
   const canGenerate = useMemo(() => {
     return (
@@ -143,8 +143,8 @@ export default function SignatureBuilder({
     setGenError("");
     setGenerating(true);
     try {
-      const data = await generateStarterCode("", {}, previewLang, signature);
-      setStarterPreview(data.starterCodeByLanguage?.[previewLang] || "");
+      const data = await generateStarterCode("", {}, "java", signature);
+      setStarterPreview(data.starterCodeByLanguage?.java || "");
     } catch (err) {
       setGenError(err.message || "Failed to generate starter code.");
     } finally {
@@ -152,9 +152,9 @@ export default function SignatureBuilder({
     }
   };
 
-  // GenerateSignature endpoint returns previews keyed by language.
+  // The endpoint returns signature previews keyed by language for compatibility.
   const previews = signaturePreview || {};
-  const activePreview = previews[previewLang] || "";
+  const activePreview = previews.java || "";
 
   return (
     <div style={{ display: "grid", gap: 18 }}>
@@ -319,7 +319,7 @@ export default function SignatureBuilder({
           {generating ? "Generating..." : "Generate Signature"}
         </button>
         <span style={{ fontSize: 11, fontFamily: "var(--font-code)", color: "var(--text-muted)" }}>
-          The platform generates Java, Python, C++, and C signatures automatically.
+          The platform generates Java signatures automatically.
         </span>
       </div>
 
@@ -332,30 +332,22 @@ export default function SignatureBuilder({
       {/* Signature previews */}
       {signature && signature.name && (
         <div>
-          <label style={labelStyle}>Generated Signatures (read-only)</label>
+          <label style={labelStyle}>Java Signature (read-only)</label>
           <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-            {AUTHORING_LANGUAGES.map((lang) => {
-              const active = previewLang === lang.id;
-              return (
-                <button
-                  key={lang.id}
-                  onClick={() => setPreviewLang(lang.id)}
-                  style={{
-                    padding: "4px 12px",
-                    borderRadius: 5,
-                    border: `1px solid ${active ? "var(--accent-blue)" : "var(--border-strong)"}`,
-                    background: active ? "var(--accent-blue-soft)" : "var(--bg-card)",
-                    color: active ? "var(--accent-blue-bright)" : "var(--text-muted)",
-                    fontSize: 11,
-                    fontFamily: "var(--font-ui)",
-                    fontWeight: 600,
-                    cursor: "pointer",
-                  }}
-                >
-                  {lang.label}
-                </button>
-              );
-            })}
+            <span
+              style={{
+                padding: "4px 12px",
+                borderRadius: 5,
+                border: "1px solid var(--accent-blue)",
+                background: "var(--accent-blue-soft)",
+                color: "var(--accent-blue-bright)",
+                fontSize: 11,
+                fontFamily: "var(--font-ui)",
+                fontWeight: 600,
+              }}
+            >
+              Java
+            </span>
             <button
               onClick={handlePreviewStarter}
               className="btn-secondary"
@@ -382,7 +374,7 @@ export default function SignatureBuilder({
               overflow: "auto",
             }}
           >
-            {starterPreview || activePreview || `// Signature generated for ${AUTHORING_LANGUAGES.find((l) => l.id === previewLang)?.label}`}
+            {starterPreview || activePreview || "// Java signature"}
           </pre>
         </div>
       )}

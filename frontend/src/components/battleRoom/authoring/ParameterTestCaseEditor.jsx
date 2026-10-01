@@ -77,7 +77,7 @@ const updateValue = (caseIndex, paramName, value) => {
           <Eye size={14} color="var(--color-success)" />
         )}
         <span style={{ color: "var(--text-primary)", fontSize: 13, fontFamily: "var(--font-ui)", fontWeight: 600 }}>
-          {hidden ? "Hidden Test Cases" : "Visible Test Cases"}
+          {hidden ? "Hidden Test Cases" : "Visible Test Cases (minimum 3)"}
         </span>
         <span style={{ color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-ui)", marginLeft: "auto" }}>
           {caseList.length} case(s)

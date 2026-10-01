@@ -29,9 +29,8 @@ const labelStyle = {
 /**
  * Problem Type + Function Signature editor.
  *
- * The admin only writes a function signature (e.g. `public int[] twoSum(int[]
- * nums, int target)`). The backend auto-generates starter code for every
- * language from this signature, which is previewed here per-language.
+ * The admin only writes a Java function signature. The backend generates and
+ * previews the matching Java starter code.
  */
 export default function SignatureEditor({
   problemType,
@@ -116,8 +115,7 @@ export default function SignatureEditor({
           Function Signature
         </label>
         <p style={{ color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-ui)", margin: "0 0 6px" }}>
-          Define only the signature — starter code for every language is generated
-          automatically by the platform.
+          Define only the signature — Java starter code is generated automatically.
         </p>
         <input
           type="text"
@@ -147,9 +145,8 @@ export default function SignatureEditor({
         )}
       </div>
 
-      {/* Per-language preview */}
       <div>
-        <label style={labelStyle}>Starter Code Preview</label>
+        <label style={labelStyle}>Java Starter Code Preview</label>
         <div style={{ display: "flex", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
           {AUTHORING_LANGUAGES.map((lang) => {
             const active = activeLang === lang.id;
@@ -201,4 +198,3 @@ export default function SignatureEditor({
     </div>
   );
 }
-

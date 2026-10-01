@@ -1,8 +1,10 @@
 # Production Readiness Report
 
 **Platform**: Coding Challenge Platform  
-**Date**: September 22, 2026  
-**Status**: READY FOR DEPLOYMENT with minor known limitations
+**Date**: October 1, 2026  
+**Status**: Application checks pass; production configuration and deployment still require environment-specific verification
+
+**Current verification**: Frontend production build and lint pass, the backend test suite passes (5 tests), and the backend production dependency audit reports no known vulnerabilities. A live deployment has not been performed.
 
 ---
 
@@ -32,7 +34,7 @@ The Coding Challenge Platform is a comprehensive coding assessment system with s
 - Enhanced `parseSchedule()` function documentation to explicitly document UTC-only approach
 - Fixed `getRoomByCode()` to use `windowState.state` instead of `room.status` for `questionsVisible`
 - Added comprehensive comments explaining why timezone string is stored but not used for access control
-- All boundary tests pass (start time, end time, before/after, exact millisecond transitions)
+- Schedule windows are start-inclusive and end-exclusive; tests cover both boundaries.
 
 **Test Results**:
 ```
@@ -40,13 +42,13 @@ The Coding Challenge Platform is a comprehensive coding assessment system with s
 ✓ At start time = ACTIVE
 ✓ Before start = NOT_STARTED  
 ✓ During window = ACTIVE
-✓ At end time = ACTIVE (room open until exact moment)
-✓ After end time = ENDED
+✓ One millisecond before end time = ACTIVE
+✓ At end time = ENDED
 ✓ Time until start calculation accurate
 ✓ Time until end calculation accurate
 ```
 
-**Verification**: All 7 schedule guard tests pass.
+**Verification**: Schedule boundary tests pass.
 
 ---
 
@@ -330,7 +332,7 @@ All endpoints follow consistent JSON response format with error messages in `err
 - Audit logs
 - Leaderboard calculations
 
-**Verified With Tests**: All 7 schedule guard tests pass including boundary cases.
+**Verified With Tests**: Schedule boundary tests pass, including exact start and end transitions.
 
 ---
 
@@ -465,7 +467,7 @@ Existing indexes are appropriate. No new indexes needed.
 |------|--------|----------|
 | Room scheduling: UTC timezone-safe | ✅ PASS | scheduleGuard.test.js passes all 7 tests |
 | Room scheduling: Start time boundary | ✅ PASS | Test confirms ACTIVE at exact start time |
-| Room scheduling: End time boundary | ✅ PASS | Test confirms ACTIVE until after end time |
+| Room scheduling: End time boundary | ✅ PASS | Test confirms ENDED at the exact end time |
 | Room scheduling: NOT_STARTED state | ✅ PASS | Test confirms correct before start |
 | Room scheduling: ENDED state | ✅ PASS | Test confirms correct after end |
 | Room scheduling: Time calculations | ✅ PASS | msUntilStart and msUntilEnd accurate |
@@ -550,7 +552,7 @@ npm run lint  # Check code quality
 ### Execution Engine Requirements
 
 - Must be accessible at configured SECURE_CODE_ENGINE_URL
-- Supports Java, Python, C, C++
+- Supports Java submissions
 - Response format must match engine contract (handled by normalizeEngineResponse)
 
 ### Deployment Checklist
@@ -615,4 +617,3 @@ The platform is:
 10. Open to users
 
 ---
-

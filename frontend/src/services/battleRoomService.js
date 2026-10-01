@@ -51,14 +51,18 @@ export const generateSignature = (name, returnType, parameters) => {
 export const createRoom = (roomData) =>
   api.post("/battle-rooms/create", roomData).then((r) => r.data);
 
-export const startRoom = (roomCode) =>
-  api.post(`/battle-rooms/${roomCode}/start`).then((r) => r.data);
+export const startRoom = (roomCode, organization) =>
+  api
+    .post(`/battle-rooms/${roomCode}/start`, { organization })
+    .then((r) => r.data);
 
 export const getRoomByCode = (roomCode) =>
   api.get(`/battle-rooms/${roomCode}`).then((r) => r.data);
 
-export const joinRoom = (roomCode, participant) =>
-  api.post("/battle-rooms/join", { roomCode, ...participant }).then((r) => r.data);
+export const joinRoom = (roomCode, organization) =>
+  api
+    .post("/battle-rooms/join", { roomCode, organization })
+    .then((r) => r.data);
 
 // Stateless code execution paths. The engine on Render can be slow on cold starts,
 // so these use a longer per-request timeout (120s) rather than the default 30s.
@@ -85,11 +89,24 @@ export const runSolution = ({ roomCode, questionId, code, language }) =>
 export const getRoomLeaderboard = (roomCode) =>
   api.get(`/battle-rooms/${roomCode}/leaderboard`).then((r) => r.data);
 
+export const downloadRoomResultsExcel = (roomCode) =>
+  api
+    .get(`/battle-rooms/${roomCode}/report/excel`, { responseType: "blob" })
+    .then((r) => r.data);
+
 export const getUserResult = (roomCode) =>
   api.get(`/battle-rooms/${roomCode}/my-result`).then((r) => r.data);
 
 export const closeRoom = (roomCode) =>
   api.post(`/battle-rooms/${roomCode}/close`).then((r) => r.data);
+
+export const getRoomResultDelivery = (roomCode) =>
+  api.get(`/battle-rooms/${roomCode}/result-delivery`).then((r) => r.data);
+
+export const retryRoomResultDelivery = (roomCode) =>
+  api
+    .post(`/battle-rooms/${roomCode}/result-delivery/retry`)
+    .then((r) => r.data);
 
 export const deleteRoom = (roomCode) =>
   api.delete(`/battle-rooms/${roomCode}`).then((r) => r.data);

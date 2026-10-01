@@ -1,4 +1,6 @@
-export const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000/api";
+export const API_BASE_URL =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? "http://localhost:5000/api" : "/api");
 
 export const SUBMISSION_STATUS = {
   PENDING: "PENDING",
@@ -51,7 +53,6 @@ export const RENDER_AWAKE_MESSAGES = [
   "Resolving npm dependency conflicts (just kidding)...",
   "Calibrating the LeetCode judge engine...",
   "Evading rate limits with tactical retries...",
-  "Compiling TypeScript to pure pain...",
   "Preparing the sandbox for untrusted code...",
   "Running pre-submission linting gauntlet...",
   "Bribing the kernel scheduler for CPU time...",
@@ -79,10 +80,12 @@ Check out my performance:
 
 #DailyCoding #Algorithms #TechChallenge #SoftwareEngineering #CodingChallenge`;
 
-export const DEFAULT_STARTER_CODE = `def solution(input):
-    # Write your code here
-    return input
-`;
+export const DEFAULT_STARTER_CODE = `class Solution {
+    public int solution(int input) {
+        // Write your code here
+        return input;
+    }
+}`;
 
 // Battle Room Constants
 export const BATTLE_ROOM_STATUS = {
@@ -148,19 +151,12 @@ export const PROBLEM_TYPE_BY_ID = Object.fromEntries(
   PROBLEM_TYPES.map((t) => [t.id, t])
 );
 
-// Languages supported by the auto starter-code / judge wrapper generator.
 export const AUTHORING_LANGUAGES = [
-  { id: "python", label: "Python", extension: ".py", monacoId: "python" },
   { id: "java", label: "Java", extension: ".java", monacoId: "java" },
-  { id: "cpp", label: "C++", extension: ".cpp", monacoId: "cpp" },
-  { id: "c", label: "C", extension: ".c", monacoId: "c" },
 ];
 
 export const SIGNATURE_EXAMPLES = {
   java: "public int[] twoSum(int[] nums, int target)",
-  python: "def twoSum(nums, target):",
-  cpp: "vector<int> twoSum(vector<int>& nums, int target)",
-  c: "int* twoSum(int* nums, int numsSize, int target)",
 };
 
 export const DEFAULT_FUNCTION_SIGNATURE_PLACEHOLDER =

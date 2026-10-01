@@ -13,7 +13,6 @@ export default function ShareModalPreview() {
         totalLinesWritten: 142,
         totalEdits: 37,
         completedEarly: true,
-        languagesUsed: ["Java"],
       },
     },
     rank: 3,

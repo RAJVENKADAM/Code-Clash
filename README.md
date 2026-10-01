@@ -56,7 +56,7 @@ This platform is designed for **academic institutions and coding bootcamps** to 
 | **Daily Coding Challenges** | One challenge per day, 24-hour contest window, single-submission rule |
 | **Monaco Code Editor** | Full-featured IDE-grade editor with syntax highlighting, dark theme, bracket matching |
 | **Proctoring Engine** | Fullscreen enforcement, copy/paste lockdown, tab-switch detection, devtools blocking, auto-disqualification after 3 violations |
-| **OTP Authentication** | Passwordless email-based OTP login with built-in rate limiting, cooldown, and account enumeration prevention |
+| **Authentication** | Verified registration with password login; an email OTP is required only to complete registration |
 | **Bayesian College Leaderboard** | Fair ranking using Top-K Bayesian average adjusted for college population size |
 | **RBAC** | Admin role for challenge creation, User role for solving |
 | **Score Calculation** | Multi-factor formula: pass ratio, solve time, execution time, memory usage |
@@ -81,8 +81,8 @@ This platform is designed for **academic institutions and coding bootcamps** to 
 | **Backend** | Node.js / Express | v18+/4.x |
 | **ODM** | Mongoose | Latest |
 | **Database** | MongoDB | v6+ (local or Atlas) |
-| **Authentication** | JWT + OTP via Nodemailer | Access/Refresh token rotation |
-| **Scheduling** | node-cron | Hourly OTP cleanup, daily rank recalibration |
+| **Authentication** | JWT password login + registration OTP via Nodemailer | Access/refresh sessions |
+| **Scheduling** | node-cron + MongoDB TTL indexes | Daily rank recalibration; expiring OTPs are removed by TTL indexes |
 | **Security Headers** | Helmet | CSP, HSTS, X-Frame-Options |
 | **Rate Limiting** | express-rate-limit | Tiered: general, auth, submissions |
 | **Validation** | express-validator | All inputs validated server-side |
@@ -181,27 +181,37 @@ Incoming Request
 
 | Control | Implementation | Details |
 |---------|---------------|---------|
-| **Passwordless Auth** | OTP via email | No passwords stored. 6-digit numeric OTP. |
-| **OTP Expiry** | 10 minutes | TTL index auto-clears expired OTPs |
-| **OTP Max Attempts** | 5 attempts | After 5 failed attempts, OTP is invalidated, user must request new one |
+| **Password Authentication** | Email + password | Passwords are bcrypt-hashed; login requires a verified account. |
+| **Registration Verification** | Email OTP | Six-digit code verifies a new registration; OTP is not a login method. |
+| **Platform Access** | Authenticated account required | Unauthenticated and guest requests cannot use platform APIs. |
+| **Organization** | Requested at room join | Registration does not request organization; the entered value is saved with that room submission. |
+| **OTP Expiry** | 5 minutes by default | Configurable TTL index auto-clears expired registration OTPs |
+| **OTP Max Attempts** | 3 attempts | After 3 failed attempts, OTP is invalidated and a new code is required |
 | **OTP Resend Cooldown** | 30 seconds | Rate-limits OTP resend requests |
-| **JWT Access Token** | Short-lived | 15 minutes expiry, signed with `JWT_SECRET`, contains `userId`, `role`, `type: "access"` |
+| **JWT Access Token** | Login session | 12 hours expiry, signed with `JWT_SECRET`, contains `userId`, `email`, `role`, `type: "login"` |
 | **JWT Refresh Token** | Rotating | 7 days expiry, cryptographically random 64-byte hex. Single-use rotation. |
 | **Session Management** | MongoDB-backed | Session model tracks device info, IP, user agent. Supports multi-device. |
-| **Account Enumeration Prevention** | Generic messages | Same response whether email exists or not: *"If an account exists, an OTP has been sent."* |
-| **Email Privacy** | Post-login | Email is explicitly deleted from public response after OTP verification: `delete publicUser.email` |
-| **OTP Field Security** | Mongoose `select: false` | `otp`, `otpExpiry`, `otpAttempts`, `otpResendAt` excluded from normal queries |
+| **Password Login** | Rate-limited | A verified account must use its registered email and password to sign in. |
+| **OTP Storage** | SHA-256 digest | The raw verification code is never stored in MongoDB. |
+
+#### Account Flow
+
+1. Register with a name, email, and password; organization is not collected.
+2. Verify the registration email with a six-digit OTP. Only then is a session issued.
+3. Sign in with the registered email and password. OTP codes cannot sign in to existing accounts.
+4. Authenticated requests include the saved bearer token; sign-out revokes the session.
+5. Enter an organization when joining each battle room. A creator who starts and auto-joins a room must also provide an organization; the backend snapshots it on the submission.
 
 #### Token Lifecycle
 
 ```
-1. Request OTP (email)
-   → Server generates 6-digit OTP, stores hashed (bcrypt) in DB
-   → Sends OTP via email (or logs to console in dev)
+1. Register (name, email, password)
+   → Server stores a bcrypt-hashed password and creates a pending account
+   → Sends a six-digit email verification OTP (or logs to console in dev)
    
-2. Verify OTP (userId + otp)
-   → Checks expiry, max attempts, validates OTP
-   → Generates access token (15m) + refresh token (7d)
+2. Verify registration OTP (userId + otp)
+   → Checks expiry, max attempts, and the registration purpose
+   → Marks the account verified and creates a 12-hour login token + 7-day refresh token
    → Creates session record in DB
    
 3. Access API (Bearer access_token)
@@ -221,7 +231,7 @@ Incoming Request
 | Control | Implementation | Details |
 |---------|---------------|---------|
 | **Rate Limiting (General)** | `express-rate-limit` | 100 requests per 15-minute window per IP |
-| **Rate Limiting (Auth)** | `express-rate-limit` | 10 requests per 15-minute window per IP. Protects OTP endpoint. |
+| **Rate Limiting (Auth)** | `express-rate-limit` | Registration OTP: 3/15min; password login: 10/15min; OTP verification: 5/5min. |
 | **Rate Limiting (Submissions)** | `express-rate-limit` | 5 requests per 1-minute window per IP |
 | **Request ID** | UUID v4 middleware | Every request gets unique `X-Request-Id` header, propagated to all logs and responses |
 | **Nonce Replay Protection** | Cryptographic nonce | 32 random bytes → 64-char hex string. One-time use per action per user. Required for `SUBMIT`, `RUN`, `CONTEST_START/END`, `ANALYTICS_FLUSH`. |
@@ -375,8 +385,9 @@ The platform collects **aggregate behavioral metadata only** — never actual ke
 
 | Job | Schedule | Action |
 |-----|----------|--------|
-| **Stale OTP Cleanup** | Every hour (cron) | Removes expired OTPs from unverified users |
+| **Creator OTP Expiry** | Automatic (MongoDB TTL) | Creator verification codes are removed at their configured `expiresAt` |
 | **College Rank Recalibration** | Daily at midnight (cron) | Recalculates and reorders college rankings |
+| **Battle Room Results** | Retained until creator deletion | Closed rooms and submissions are not automatically purged |
 | **Session TTL** | Automatic (MongoDB TTL) | Expired sessions auto-deleted at `expiresAt` |
 | **Nonce TTL** | Automatic (MongoDB TTL) | Unused nonces auto-deleted after 24 hours |
 | **Audit Log TTL** | Automatic (MongoDB TTL) | Logs auto-deleted after 90 days |
@@ -422,9 +433,10 @@ BayesianScore = TopKAvg × ParticipationMultiplier
 
 | Method | Endpoint | Auth | Rate Limit | Description |
 |--------|----------|------|-----------|-------------|
-| `POST` | `/api/auth/request-otp` | No | 10/15min | Request OTP to email |
-| `POST` | `/api/auth/verify-otp` | No | 10/15min | Verify OTP, receive JWT |
-| `POST` | `/api/auth/resend-otp` | No | 10/15min | Resend OTP (30s cooldown) |
+| `POST` | `/api/auth/request-otp` | No | 3/15min | Begin registration with name, email, and password |
+| `POST` | `/api/auth/verify-otp` | No | 5/5min | Verify registration email and receive a session |
+| `POST` | `/api/auth/login-password` | No | 10/15min | Sign in with registered email and password |
+| `POST` | `/api/auth/resend-otp` | No | 5/15min | Resend registration OTP (30s cooldown) |
 | `POST` | `/api/auth/refresh-token` | No | 10/15min | Rotate refresh token |
 | `POST` | `/api/auth/logout` | Yes | 100/15min | Revoke session |
 | `POST` | `/api/auth/logout-all` | Yes | 100/15min | Revoke all sessions |
@@ -449,7 +461,7 @@ BayesianScore = TopKAvg × ParticipationMultiplier
 | `POST` | `/api/submissions` | Yes | 5/1min | Create submission (single per challenge) |
 | `GET` | `/api/submissions/:challengeId` | Yes | 100/15min | Get submission result |
 | `GET` | `/api/submissions/history` | Yes | 100/15min | Get paginated submission history |
-| `PUT` | `/api/submissions/:id/result` | Optional | 100/15min | Update execution result (judge engine) |
+| `PUT` | `/api/submissions/:id/result` | Judge callback key | 100/15min | Update execution result using `X-Judge-Callback-Key` |
 | `PUT` | `/api/submissions/:id/disqualify` | Yes | 5/1min | Admin disqualify submission |
 
 ### Code Execution
@@ -600,19 +612,22 @@ open http://localhost:5173
 | `PORT` | Server port | 5000 | - |
 | `NODE_ENV` | Environment | development | Controls error detail exposure |
 | `CLIENT_URL` | Frontend URL for CORS | http://localhost:5173 | CORS whitelist |
+| `API_PUBLIC_URL` | Public backend API base URL used in emailed certificate links (include `/api`) | `http://localhost:5000/api` in development; production falls back to `${CLIENT_URL}/api` | Certificate downloads must be reachable by recipients |
 | `MONGODB_URI` | MongoDB connection string | mongodb://localhost:27017/coding-challenge-platform | Database access |
 | `JWT_SECRET` | Secret for JWT signing | (required) | **Must be strong random string** |
 | `JWT_REFRESH_SECRET` | Secret for refresh tokens | (required) | **Must be different from JWT_SECRET** |
-| `EMAIL_HOST` | SMTP host | smtp.ethereal.email | OTP delivery |
-| `EMAIL_PORT` | SMTP port | 587 | OTP delivery |
-| `EMAIL_USER` | SMTP username | (your email) | OTP delivery |
-| `EMAIL_PASS` | SMTP password | (your app password) | OTP delivery |
+| `EMAIL_HOST` | SMTP host | (required for email delivery) | Creator OTP and battle result/certificate email |
+| `EMAIL_PORT` | SMTP port | 587 | Email delivery |
+| `EMAIL_USER` | SMTP username | (required for email delivery) | Email delivery |
+| `EMAIL_PASS` | SMTP password | (required for email delivery) | Email delivery |
 | `RENDER_EXECUTOR_URL` | Remote code executor | https://code-executor.onrender.com | Sandboxed execution |
 | `RATE_LIMIT_WINDOW_MS` | Rate limit window | 900000 (15min) | DoS protection |
 | `RATE_LIMIT_MAX` | Max requests per window | 100 | DoS protection |
 | `OTP_EXPIRY_MINUTES` | OTP validity duration | 10 | Auth security |
+| `OTP_TTL_SECONDS` | Creator OTP validity duration | 300 | Creator verification |
 | `OTP_MAX_ATTEMPTS` | Max OTP verification attempts | 5 | Brute force protection |
 | `OTP_RESEND_COOLDOWN_SECONDS` | OTP resend cooldown | 30 | Abuse prevention |
+| `JUDGE_CALLBACK_SECRET` | Secret for judge-result callbacks | (unset; endpoint disabled until configured) | Internal callback authentication |
 | `JWT_EXPIRY` | Access token lifespan | 15m | Session security |
 | `JWT_REFRESH_EXPIRY` | Refresh token lifespan | 7d | Session security |
 | `JWT_ISSUER` | JWT issuer claim | amux-ccp | Token validation |
@@ -628,4 +643,3 @@ open http://localhost:5173
 ## License
 
 MIT
-

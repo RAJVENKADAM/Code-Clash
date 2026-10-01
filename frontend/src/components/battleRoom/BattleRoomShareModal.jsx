@@ -10,6 +10,8 @@ export default function BattleRoomShareModal({
   const [downloaded, setDownloaded] = useState(false);
 
   const room = result?.room || {};
+  const rank = Number(result?.rank) || 1;
+  const totalParticipants = Number(result?.totalParticipants) || 1;
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
@@ -261,14 +263,25 @@ export default function BattleRoomShareModal({
     ctx.fillText("demonstrated throughout the challenge.", 600, 490);
 
     // =========================================================
+    // RANK
+    // =========================================================
+    ctx.fillStyle = "#1d4ed8";
+    ctx.font = "bold 18px Arial, Helvetica, sans-serif";
+    ctx.fillText(
+      `FINAL RANK #${rank} OF ${totalParticipants}`,
+      600,
+      520,
+    );
+
+    // =========================================================
     // MAIN DIVIDER
     // =========================================================
     ctx.strokeStyle = "#c9c6c6";
     ctx.lineWidth = 0.5;
 
     ctx.beginPath();
-    ctx.moveTo(150, 500);
-    ctx.lineTo(1050, 500);
+    ctx.moveTo(150, 540);
+    ctx.lineTo(1050, 540);
     ctx.stroke();
 
     // =========================================================
@@ -336,7 +349,7 @@ export default function BattleRoomShareModal({
     ctx.fillText("CODECLASH • COMPETE • CODE • CONQUER", 600, 695);
 
     ctx.textAlign = "left";
-  }, [userName, room.title]);
+  }, [rank, totalParticipants, userName, room.title]);
 
   useEffect(() => {
     if (!isOpen) return;

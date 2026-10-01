@@ -1,4 +1,10 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+} from "react-router-dom";
 import { AuthProvider } from "../context/AuthContext";
 
 import Home from "../pages/Home";
@@ -6,9 +12,12 @@ import BattleRoom from "../pages/BattleRoom";
 import CreateBattleRoom from "../pages/CreateBattleRoom";
 import BattleRoomChallenge from "../pages/BattleRoomChallenge";
 import BattleRoomLeaderboard from "../pages/BattleRoomLeaderboard";
+import AuthPage from "../pages/AuthPage";
+import Profile from "../pages/Profile";
 
 import Navbar from "../components/layout/Navbar";
 import Footer from "../components/layout/Footer";
+import { useAuth } from "../context/AuthContext";
 
 function AppLayout({ children }) {
   return (
@@ -28,11 +37,35 @@ function AppLayout({ children }) {
 }
 
 function ProtectedLayout({ children }) {
+  const { isAuthenticated, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <div role="status" style={{ padding: 32 }}>Checking your session...</div>;
+  if (!isAuthenticated) {
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: `${location.pathname}${location.search}` }}
+      />
+    );
+  }
   return <AppLayout>{children}</AppLayout>;
 }
 
 // Full-screen layout for the challenge assessment: no navbar, no footer.
 function FullScreenProtectedLayout({ children }) {
+  const { isAuthenticated, loading } = useAuth();
+  const location = useLocation();
+  if (loading) return <div role="status" style={{ padding: 32 }}>Checking your session...</div>;
+  if (!isAuthenticated) {
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: `${location.pathname}${location.search}` }}
+      />
+    );
+  }
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg-main)" }}>
       {children}
@@ -40,11 +73,28 @@ function FullScreenProtectedLayout({ children }) {
   );
 }
 
+function UnauthenticatedOnlyPage({ mode }) {
+  const { isAuthenticated, loading } = useAuth();
+  if (loading) {
+    return <div role="status" style={{ padding: 32 }}>Checking your session...</div>;
+  }
+  if (isAuthenticated) return <Navigate to="/battle-room" replace />;
+  return <AuthPage mode={mode} />;
+}
+
 export default function AppRouter() {
   return (
     <BrowserRouter>
       <AuthProvider>
         <Routes>
+          <Route
+            path="/login"
+            element={<UnauthenticatedOnlyPage mode="login" />}
+          />
+          <Route
+            path="/register"
+            element={<UnauthenticatedOnlyPage mode="register" />}
+          />
           <Route
             path="/"
             element={
@@ -58,6 +108,14 @@ export default function AppRouter() {
             element={
               <ProtectedLayout>
                 <BattleRoom />
+              </ProtectedLayout>
+            }
+          />
+          <Route
+            path="/profile"
+            element={
+              <ProtectedLayout>
+                <Profile />
               </ProtectedLayout>
             }
           />
@@ -94,7 +152,7 @@ export default function AppRouter() {
             }
           />
 
-          <Route path="*" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/battle-room" replace />} />
         </Routes>
       </AuthProvider>
     </BrowserRouter>

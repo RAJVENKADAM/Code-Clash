@@ -4,13 +4,18 @@ export default function CodeEditorSandbox({
   value = "",
   onChange,
   readOnly = false,
-  language = "javascript",
+  language = "java",
   height = "100%",
 }) {
   const [isMonacoLoaded, setIsMonacoLoaded] = useState(false);
   const [editorInstance, setEditorInstance] = useState(null);
   const containerRef = useRef(null);
   const monacoRef = useRef(null);
+  const editorInstanceRef = useRef(null);
+  const onChangeRef = useRef(onChange);
+  const editorOptionsRef = useRef({ value, language, readOnly });
+  onChangeRef.current = onChange;
+  editorOptionsRef.current = { value, language, readOnly };
 
   useEffect(() => {
     if (typeof window !== "undefined" && !window.monaco) {
@@ -98,15 +103,21 @@ export default function CodeEditorSandbox({
   }, []);
 
   useEffect(() => {
-    if (!isMonacoLoaded || !containerRef.current || editorInstance) return;
+    if (
+      !isMonacoLoaded ||
+      !containerRef.current ||
+      editorInstanceRef.current
+    ) {
+      return;
+    }
 
     const monaco = monacoRef.current;
 
     const editor = monaco.editor.create(containerRef.current, {
-      value: value || "",
-      language: language,
+      value: editorOptionsRef.current.value || "",
+      language: editorOptionsRef.current.language,
       theme: "oneDarkProTheme",
-      readOnly: readOnly,
+      readOnly: editorOptionsRef.current.readOnly,
       minimap: { enabled: false },
       fontSize: 14,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace",
@@ -141,20 +152,22 @@ export default function CodeEditorSandbox({
 
     editor.onDidChangeModelContent(() => {
       const currentValue = editor.getValue();
-      if (onChange) {
-        onChange(currentValue);
-      }
+      onChangeRef.current?.(currentValue);
     });
 
     // Allow copy/paste INSIDE the editor (Monaco handles this natively).
     // The global proctor guard blocks copy/paste outside the editor.
+    editorInstanceRef.current = editor;
     setEditorInstance(editor);
-
-    return () => {
-      editor.dispose();
-      setEditorInstance(null);
-    };
   }, [isMonacoLoaded]);
+
+  useEffect(
+    () => () => {
+      editorInstanceRef.current?.dispose();
+      editorInstanceRef.current = null;
+    },
+    [],
+  );
 
   useEffect(() => {
     if (editorInstance && value !== undefined) {

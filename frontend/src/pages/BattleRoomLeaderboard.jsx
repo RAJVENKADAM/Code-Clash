@@ -1,10 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 // REMOVED: getPublicLeaderboard
 import {
   getRoomLeaderboard,
+  downloadRoomResultsExcel,
   closeRoom,
   getUserResult,
+  getRoomResultDelivery,
+  retryRoomResultDelivery,
 } from "../services/battleRoomService";
 import BattleRoomShareModal from "../components/battleRoom/BattleRoomShareModal";
 import {
@@ -15,7 +18,8 @@ import {
   Users,
   XCircle,
   Share2,
-  Printer,
+  FileSpreadsheet,
+  RefreshCw,
 } from "lucide-react";
 
 function LeaderboardSkeleton() {
@@ -95,28 +99,65 @@ export default function BattleRoomLeaderboard() {
   const [closing, setClosing] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [myResult, setMyResult] = useState(null);
+  const [downloading, setDownloading] = useState(false);
+  const [retryingDelivery, setRetryingDelivery] = useState(false);
+  const [resultDelivery, setResultDelivery] = useState(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const loadedRoomCodeRef = useRef(null);
+  const hasLoadedDataRef = useRef(false);
 
   useEffect(() => {
-    fetchLeaderboard();
-    const interval = setInterval(fetchLeaderboard, 3000);
-    return () => clearInterval(interval);
-  }, [roomCode]);
-
-  // REFACTORED: Removed nested try/catch block referencing the non-existent function
-  const fetchLeaderboard = async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const data = await getRoomLeaderboard(roomCode);
-      setRoom(data.room);
-      setLeaderboard(data.leaderboard || []);
-      setIsCreator(data.isCreator);
-    } catch (err) {
-      setError(err.message || "Failed to load leaderboard.");
-    } finally {
-      setLoading(false);
+    let active = true;
+    let requestInFlight = false;
+    const isNewRoom = loadedRoomCodeRef.current !== roomCode;
+    if (isNewRoom) {
+      loadedRoomCodeRef.current = roomCode;
+      hasLoadedDataRef.current = false;
+      setRoom(null);
+      setLeaderboard([]);
+      setResultDelivery(null);
+      setError("");
+      setLoading(true);
     }
-  };
+    let interval;
+
+    const loadLeaderboard = async () => {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      try {
+        const data = await getRoomLeaderboard(roomCode);
+        if (!active) return;
+        setRoom(data.room);
+        setLeaderboard(data.leaderboard || []);
+        setIsCreator(data.isCreator);
+        setError("");
+        hasLoadedDataRef.current = true;
+        if (data.isCreator && data.room?.status === "CLOSED") {
+          const delivery = await getRoomResultDelivery(roomCode);
+          if (active) setResultDelivery(delivery);
+        } else {
+          setResultDelivery(null);
+        }
+        if (data.room?.status === "CLOSED" && interval) {
+          clearInterval(interval);
+        }
+      } catch (err) {
+        if (active && !hasLoadedDataRef.current) {
+          setError(err.message || "Failed to load leaderboard.");
+        }
+      } finally {
+        requestInFlight = false;
+        if (active) setLoading(false);
+      }
+    };
+
+    loadLeaderboard();
+    interval = setInterval(loadLeaderboard, 5000);
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [roomCode, refreshVersion]);
 
   const handleCloseRoom = async () => {
     if (
@@ -129,11 +170,25 @@ export default function BattleRoomLeaderboard() {
     try {
       const data = await closeRoom(roomCode);
       alert(data.message || "Room closed! Results sent via email.");
-      fetchLeaderboard();
+      setRefreshVersion((version) => version + 1);
     } catch (err) {
       setError(err.message || "Failed to close room.");
     } finally {
       setClosing(false);
+    }
+  };
+
+  const handleRetryDelivery = async () => {
+    setRetryingDelivery(true);
+    setError("");
+    try {
+      const data = await retryRoomResultDelivery(roomCode);
+      alert(data.message || "Result delivery retry finished.");
+      setRefreshVersion((version) => version + 1);
+    } catch (err) {
+      setError(err.message || "Failed to retry result delivery.");
+    } finally {
+      setRetryingDelivery(false);
     }
   };
 
@@ -144,6 +199,26 @@ export default function BattleRoomLeaderboard() {
       setShowShare(true);
     } catch (err) {
       setError(err.message || "Failed to get your result.");
+    }
+  };
+
+  const handleDownloadResults = async () => {
+    setDownloading(true);
+    setError("");
+    try {
+      const file = await downloadRoomResultsExcel(roomCode);
+      const url = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `room-results-${roomCode}.xlsx`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      setError(err.message || "Failed to download room results.");
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -243,7 +318,17 @@ export default function BattleRoomLeaderboard() {
                 }}
               >
                 <Clock size={13} />
-                {room.timeLimit} {room.timeLimitUnit || "minutes"}
+                {room.scheduledDate && room.startTime && room.endTime
+                  ? `${new Intl.DateTimeFormat(undefined, {
+                      timeZone: room.timezone || "UTC",
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    }).format(new Date(room.startTime))} – ${new Intl.DateTimeFormat(undefined, {
+                      timeZone: room.timezone || "UTC",
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    }).format(new Date(room.endTime))}`
+                  : `${room.timeLimit} ${room.timeLimitUnit || "minutes"}`}
               </span>
             ) : null}
           </p>
@@ -251,13 +336,19 @@ export default function BattleRoomLeaderboard() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {isCreator ? (
             <button
-              onClick={() => window.print()}
+              onClick={handleDownloadResults}
+              disabled={downloading}
               className="btn-secondary"
-              style={{ padding: "8px 16px", fontSize: 12 }}
-              title="Use the browser PDF printer to save this owner report"
+              style={{
+                padding: "8px 16px",
+                fontSize: 12,
+                opacity: downloading ? 0.65 : 1,
+                cursor: downloading ? "wait" : "pointer",
+              }}
+              title="Download the participant ranks and scores as an Excel workbook"
             >
-              <Printer size={13} />
-              Export owner report (PDF)
+              <FileSpreadsheet size={13} />
+              {downloading ? "Downloading..." : "Download results (Excel)"}
             </button>
           ) : null}
           {isCreator && room && room.status === "ACTIVE" ? (
@@ -282,6 +373,40 @@ export default function BattleRoomLeaderboard() {
               <XCircle size={13} />
               {closing ? "Closing..." : "End Battle & Send Results"}
             </button>
+          ) : null}
+          {isCreator && room?.status === "CLOSED" ? (
+            <>
+              {resultDelivery ? (
+                <span
+                  style={{
+                    alignSelf: "center",
+                    color: "var(--text-muted)",
+                    fontSize: 12,
+                  }}
+                  aria-live="polite"
+                >
+                  Result/certificate emails:{" "}
+                  {resultDelivery.counts?.SENT || 0} sent,{" "}
+                  {resultDelivery.counts?.FAILED || 0} failed,{" "}
+                  {resultDelivery.counts?.SKIPPED || 0} skipped.
+                </span>
+              ) : null}
+              {resultDelivery?.counts?.FAILED > 0 ? (
+                <button
+                  onClick={handleRetryDelivery}
+                  disabled={retryingDelivery}
+                  className="btn-secondary"
+                  style={{
+                    padding: "8px 16px",
+                    fontSize: 12,
+                    opacity: retryingDelivery ? 0.65 : 1,
+                  }}
+                >
+                  <RefreshCw size={13} />
+                  {retryingDelivery ? "Retrying..." : "Retry failed emails"}
+                </button>
+              ) : null}
+            </>
           ) : null}
           <button
             onClick={handleViewMyResult}
@@ -324,7 +449,7 @@ export default function BattleRoomLeaderboard() {
             background: "var(--bg-elevated)",
             border: "1px solid var(--border-color)",
             borderRadius: 12,
-            overflow: "hidden",
+            overflowX: "auto",
           }}
         >
           <div
@@ -358,7 +483,9 @@ export default function BattleRoomLeaderboard() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "50px 1fr 1fr 90px 90px 90px 90px",
+              gridTemplateColumns:
+                "50px minmax(140px, 1fr) minmax(140px, 1fr) 90px 110px 90px 90px",
+              minWidth: 800,
               gap: 12,
               padding: "8px 16px",
               borderBottom: "1px solid var(--border-color)",
@@ -374,7 +501,7 @@ export default function BattleRoomLeaderboard() {
             <div>Name</div>
             <div>Organization</div>
             <div style={{ textAlign: "right" }}>Score</div>
-            <div style={{ textAlign: "center" }}>Passed</div>
+            <div style={{ textAlign: "center" }}>Tests passed</div>
             <div style={{ textAlign: "center" }}>Time</div>
             <div style={{ textAlign: "center" }}>Status</div>
           </div>
@@ -389,8 +516,7 @@ export default function BattleRoomLeaderboard() {
                 fontSize: 13,
               }}
             >
-              No completed submissions yet. Participants will appear here once
-              they finish.
+              No participants have joined this battle yet.
             </div>
           ) : (
             leaderboard.map((row) => (
@@ -398,7 +524,9 @@ export default function BattleRoomLeaderboard() {
                 key={row.userId || row.rank}
                 style={{
                   display: "grid",
-                  gridTemplateColumns: "50px 1fr 1fr 90px 90px 90px 90px",
+                  gridTemplateColumns:
+                    "50px minmax(140px, 1fr) minmax(140px, 1fr) 90px 110px 90px 90px",
+                  minWidth: 800,
                   gap: 12,
                   padding: "10px 16px",
                   borderBottom: "1px solid var(--border-color)",
@@ -472,7 +600,7 @@ export default function BattleRoomLeaderboard() {
                 <div
                   style={{ color: "var(--text-muted)", textAlign: "center" }}
                 >
-                  {row.totalPassed}/{row.totalQuestions}
+                  {row.totalPassed}/{row.totalTestCases ?? row.totalQuestions}
                 </div>
                 <div
                   style={{ color: "var(--text-muted)", textAlign: "center" }}
