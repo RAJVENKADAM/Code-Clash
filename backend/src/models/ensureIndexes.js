@@ -1,4 +1,5 @@
 import Otp from "./Otp.js";
+import CreatorVerificationOtp from "./CreatorVerificationOtp.js";
 import config from "../config/env.js";
 
 /**
@@ -27,6 +28,23 @@ export async function ensureOtpTtlIndex() {
   }
 }
 
+export async function ensureCreatorVerificationOtpTtlIndex() {
+  try {
+    await CreatorVerificationOtp.collection.createIndex(
+      { expiresAt: 1 },
+      { expireAfterSeconds: 0, name: "expiresAt_1" },
+    );
+    console.log("[Models] Creator verification OTP TTL index ensured.");
+  } catch (error) {
+    console.error(
+      "[Models] Failed to ensure creator verification OTP TTL index:",
+      error.message,
+    );
+    throw error;
+  }
+}
+
 export default {
   ensureOtpTtlIndex,
+  ensureCreatorVerificationOtpTtlIndex,
 };

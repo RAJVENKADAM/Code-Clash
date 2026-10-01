@@ -1,4 +1,4 @@
-// isolate2.js - Writes results to a log file. Tests fetch vs https, language case, java vs python.
+// isolate2.js - Writes Java execution diagnostics to a log file.
 import dotenv from "dotenv";
 dotenv.config();
 import { writeFileSync, appendFileSync } from "fs";
@@ -72,8 +72,6 @@ function withHttps(label) {
   });
 }
 
-const pyCode = "print(42)";
-
 async function main() {
   log("\n=== fetch: JAVA uppercase ===");
   await withFetch("fetch JAVA(up)", { payload: { language: "JAVA", code: javaCode, timeLimit: 2000, memoryLimit: 65536, testCases: [{ input: "", expectedOutput: "hello" }] } });
@@ -86,12 +84,6 @@ async function main() {
 
   log("\n=== https module: JAVA ===");
   await withHttps("https JAVA");
-
-  log("\n=== fetch: PYTHON uppercase ===");
-  await withFetch("fetch PYTHON(up)", { payload: { language: "PYTHON", code: pyCode, timeLimit: 2000, memoryLimit: 65536, testCases: [{ input: "", expectedOutput: "42" }] } });
-
-  log("\n=== fetch: PYTHON lowercase ===");
-  await withFetch("fetch python(low)", { payload: { language: "python", code: pyCode, timeLimit: 2000, memoryLimit: 65536, testCases: [{ input: "", expectedOutput: "42" }] } });
 
   log("\n=== DONE ===");
   try { writeFileSync("backend/src/diagnostics/diag2.complete", "yes"); } catch {}

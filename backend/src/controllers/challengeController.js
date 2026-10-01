@@ -51,8 +51,6 @@ function attachFreshStarters(challenge) {
     // Also set a default starterCode for backward compatibility
     obj.starterCode =
       obj.starterCodes?.java ||
-      obj.starterCodes?.python ||
-      obj.starterCodes?.cpp ||
       "";
   }
   return obj;
@@ -75,10 +73,7 @@ export async function createChallenge(req, res) {
         .json({ error: "A challenge with this title already exists." });
     }
 
-    const preview = await previewChallengeExecution(
-      normalized,
-      Object.keys(normalized.functionSignatures)[0] || "java",
-    );
+    const preview = await previewChallengeExecution(normalized);
     if (!preview.accepted) {
       return res
         .status(400)
@@ -297,8 +292,6 @@ export async function getTodayChallenge(req, res) {
       result.starterCodes = freshStarters;
       result.starterCode =
         freshStarters?.java ||
-        freshStarters?.python ||
-        freshStarters?.cpp ||
         result.starterCode ||
         "";
     }
@@ -333,8 +326,6 @@ export async function getChallengeById(req, res) {
       result.starterCodes = freshStarters;
       result.starterCode =
         freshStarters?.java ||
-        freshStarters?.python ||
-        freshStarters?.cpp ||
         result.starterCode ||
         "";
     }

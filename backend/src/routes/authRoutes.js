@@ -10,13 +10,14 @@ import {
   getSessions,
   getProfile,
   loginWithPasswordHandler,
+  requestPasswordResetHandler,
+  resetPasswordHandler,
 } from "../controllers/authController.js";
 import { authenticate } from "../middleware/auth.js";
 import {
   validateEmail,
   validateOTP,
   validateUserId,
-  validateOrganization,
   handleValidationErrors,
 } from "../middleware/validate.js";
 import { auditLogin, auditLogout } from "../middleware/auditLog.js";
@@ -46,6 +47,16 @@ const requestOtpLimiter = rateLimit({
   },
 });
 
+const passwordLoginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Too many sign-in attempts. Please try again in 15 minutes.",
+  },
+});
+
 const verifyOtpLimiter = rateLimit({
   windowMs: 5 * 60 * 1000, // 5 minutes
   max: 5, // 5 requests per IP per window
@@ -68,12 +79,29 @@ const resendOtpLimiter = rateLimit({
   },
 });
 
-router.post("/login-password", loginWithPasswordHandler);
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    error: "Too many password reset attempts. Please try again later.",
+  },
+});
+
+router.post("/login-password", passwordLoginLimiter, loginWithPasswordHandler);
+router.post(
+  "/request-password-reset",
+  passwordResetLimiter,
+  validateEmail,
+  handleValidationErrors,
+  requestPasswordResetHandler,
+);
+router.post("/reset-password", passwordResetLimiter, resetPasswordHandler);
 router.post(
   "/request-otp",
   requestOtpLimiter,
   validateEmail,
-  validateOrganization,
   handleValidationErrors,
   requestOTP,
 );
@@ -81,7 +109,6 @@ router.post(
   "/verify-otp",
   verifyOtpLimiter,
   validateUserId,
-  validateOrganization,
   validateOTP,
   handleValidationErrors,
   verifyOTP,
@@ -90,7 +117,6 @@ router.post(
 router.post(
   "/resend-otp",
   resendOtpLimiter,
-  validateOrganization,
   handleValidationErrors,
   resendOTPHandler,
 );

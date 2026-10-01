@@ -1,7 +1,10 @@
 import BattleRoom from "../models/BattleRoom.js";
 import BattleRoomSubmission from "../models/BattleRoomSubmission.js";
 import { executionService } from "../services/executionService.js";
-import { sendBattleRoomResultEmail } from "../services/emailService.js";
+import {
+  closeBattleRoomAndNotify,
+  retryBattleRoomResultDelivery,
+} from "../services/battleRoomClosureService.js";
 import { composeProgram } from "../services/wrapperGenerator.js";
 import {
   getStoredSignature,
@@ -11,18 +14,57 @@ import { composeStarterFile } from "../services/languageTemplates.js";
 import {
   getRoomReportData,
   streamCompleteRoomPDF,
+  streamRoomResultsExcel,
   streamParticipantReportPDF,
 } from "../services/reportService.js";
 import {
   getRoomWindowState,
   isCodeExecutionAllowed,
   buildBlockedRoomPayload,
+  hasScheduledWindow,
   ROOM_WINDOW_STATE,
 } from "../services/scheduleGuard.js";
+import {
+  calculateQuestionScore,
+  countRoomTestCases,
+} from "../services/battleRoomScoring.js";
 
-// Only languages supported by the Secure Code Engine.
-const SUPPORTED_LANGUAGES = ["java"];
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+const RANKED_SUBMISSION_STATUSES = [
+  "PENDING",
+  "PROCESSING",
+  "COMPLETED",
+  "DISQUALIFIED",
+];
+
+function getRoomSubmissionTime(submission) {
+  return (submission.questionResults || []).reduce(
+    (seconds, question) => seconds + (question.timeToSolve || 0),
+    0,
+  );
+}
+
+function sortRoomSubmissions(submissions) {
+  return submissions.sort((a, b) => {
+    if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+    if (b.totalPassed !== a.totalPassed) return b.totalPassed - a.totalPassed;
+    if (a.totalFailed !== b.totalFailed) return a.totalFailed - b.totalFailed;
+    const timeDifference =
+      getRoomSubmissionTime(a) - getRoomSubmissionTime(b);
+    if (timeDifference !== 0) return timeDifference;
+    return (a.participantName || a.userId?.name || "").localeCompare(
+      b.participantName || b.userId?.name || "",
+      undefined,
+      { sensitivity: "base" },
+    );
+  });
+}
+
+function warmUpJudgeEngine() {
+  executionService.warmUp().catch((error) => {
+    console.warn("[BattleRoom] Judge engine warm-up failed:", error.message);
+  });
+}
 
 function generateRoomCode() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -34,7 +76,7 @@ function generateRoomCode() {
 }
 
 function isValidLanguage(lang) {
-  return SUPPORTED_LANGUAGES.includes(lang);
+  return String(lang || "").toLowerCase() === "java";
 }
 
 /**
@@ -54,6 +96,8 @@ function isValidLanguage(lang) {
  *    Examples: "2026-01-15", "03:30 PM", "15:30" (24h), timezone="Asia/Kolkata"
  */
 function parseSchedule({
+  startDate,
+  endDate,
   startTime,
   endTime,
   scheduledDate,
@@ -66,16 +110,30 @@ function parseSchedule({
   const tz = timezone || "UTC";
 
   // 1. Direct ISO 8601 strings or timestamp inputs (highest priority)
-  if (startTime && endTime) {
-    const s = new Date(startTime);
-    const e = new Date(endTime);
-    if (!isNaN(s.getTime()) && !isNaN(e.getTime())) {
-      return { start: s, end: e, timezone: tz };
+  const scheduledStart = startDate || startTime;
+  const scheduledEnd = endDate || endTime;
+  if (scheduledStart || scheduledEnd) {
+    if (!scheduledStart || !scheduledEnd) {
+      throw new Error("Both scheduled start and end timestamps are required.");
     }
+    const s = new Date(scheduledStart);
+    const e = new Date(scheduledEnd);
+    if (isNaN(s.getTime()) || isNaN(e.getTime())) {
+      throw new Error("Scheduled start and end timestamps must be valid.");
+    }
+    if (e <= s) {
+      throw new Error("Scheduled end time must be after the start time.");
+    }
+    return { start: s, end: e, timezone: tz };
   }
 
   // 2. Scheduled Date + Time string inputs (date picker workflow)
-  if (scheduledDate && scheduledStartTime) {
+  if (scheduledDate || scheduledStartTime || scheduledEndTime) {
+    if (!scheduledDate || !scheduledStartTime || !scheduledEndTime) {
+      throw new Error(
+        "A scheduled battle requires a date, start time, and end time.",
+      );
+    }
     const parseTimeString = (dateStr, timeStr) => {
       const trimmed = (timeStr || "").trim();
       // Match "3:30 PM", "3:30", "15:30", "15:30 PM" (12h and 24h formats)
@@ -84,6 +142,13 @@ function parseSchedule({
       let hours = parseInt(match[1], 10);
       const minutes = parseInt(match[2], 10);
       const meridiem = match[3] ? match[3].toUpperCase() : null;
+      if (
+        minutes > 59 ||
+        hours > (meridiem ? 12 : 23) ||
+        (hours < 1 && meridiem)
+      ) {
+        return null;
+      }
 
       // Convert 12-hour to 24-hour if meridiem is specified
       if (meridiem === "PM" && hours < 12) hours += 12;
@@ -125,17 +190,15 @@ function parseSchedule({
     };
 
     const s = parseTimeString(scheduledDate, scheduledStartTime);
-    let e = scheduledEndTime
-      ? parseTimeString(scheduledDate, scheduledEndTime)
-      : null;
+    const e = parseTimeString(scheduledDate, scheduledEndTime);
 
-    if (s && !isNaN(s.getTime())) {
-      // If end time not provided or invalid, compute it from duration
-      if (!e || isNaN(e.getTime()) || e <= s) {
-        e = new Date(s.getTime() + (durationMinutes || 60) * 60 * 1000);
-      }
-      return { start: s, end: e, timezone: tz };
+    if (!s || !e || isNaN(s.getTime()) || isNaN(e.getTime())) {
+      throw new Error("Enter a valid scheduled date, start time, and end time.");
     }
+    if (e <= s) {
+      throw new Error("Scheduled end time must be after the start time.");
+    }
+    return { start: s, end: e, timezone: tz };
   }
 
   // 3. Fallback: No schedule provided. Start immediately with given duration.
@@ -168,16 +231,12 @@ async function executeComposedQuestion(question, code, language, testCases) {
 }
 
 /**
- * Generate fresh starter code for all 4 languages from a question's signature.
+ * Generate fresh Java starter code from a question's signature.
  */
 function generateFreshStarters(question) {
   if (!question.signature || !question.signature.name) return {};
   const sig = getStoredSignature(question.signature);
-  const starters = {};
-  for (const lang of SUPPORTED_LANGUAGES) {
-    starters[lang] = composeStarterFile(sig, lang);
-  }
-  return starters;
+  return { java: composeStarterFile(sig, "java") };
 }
 
 export async function createRoom(req, res) {
@@ -186,10 +245,7 @@ export async function createRoom(req, res) {
       title,
       description,
       questions,
-      timeLimit,
-      timeLimitUnit,
       maxParticipants,
-      languages,
       moderationAction,
       allowLeaderboard,
       allowReuse,
@@ -197,16 +253,27 @@ export async function createRoom(req, res) {
       scheduledStartTime,
       scheduledEndTime,
       timezone,
-      // Accept direct ISO start/end overrides from frontend
+      // Legacy timestamp aliases remain accepted for existing clients.
+      startDate: rawStartDate,
+      endDate: rawEndDate,
       startTime: rawStartTime,
       endTime: rawEndTime,
     } = req.body;
     const userId = req.userId;
 
-    if (!title || !questions || questions.length === 0) {
+    if (
+      typeof title !== "string" ||
+      !title.trim() ||
+      title.trim().length > 120 ||
+      !Array.isArray(questions) ||
+      questions.length === 0
+    ) {
       return res
         .status(400)
-        .json({ error: "Title and at least one question are required." });
+        .json({
+          error:
+            "A title of at most 120 characters and at least one question are required.",
+        });
     }
 
     if (questions.length > 20) {
@@ -215,25 +282,31 @@ export async function createRoom(req, res) {
         .json({ error: "Maximum 20 questions per battle room." });
     }
 
-    const tUnit = timeLimitUnit || "minutes";
-    const allowedUnits = ["minutes", "hours", "days", "weeks"];
-    if (!allowedUnits.includes(tUnit)) {
-      return res.status(400).json({ error: "Invalid time limit unit." });
-    }
-    const tValue = timeLimit || 60;
-    const durationMinutes =
-      tValue *
-      (tUnit === "hours"
-        ? 60
-        : tUnit === "days"
-          ? 1440
-          : tUnit === "weeks"
-            ? 10080
-            : 1);
-    if (tValue < 1 || durationMinutes > 2000 * 7 * 24) {
+    if (
+      maxParticipants !== undefined &&
+      (!Number.isInteger(maxParticipants) || maxParticipants < 1)
+    ) {
       return res
         .status(400)
-        .json({ error: "Time limit is out of valid range." });
+        .json({ error: "Maximum participants must be a positive whole number." });
+    }
+
+    const calendarScheduleProvided = Boolean(
+      scheduledDate || scheduledStartTime || scheduledEndTime,
+    );
+    const directScheduleProvided = Boolean(
+      rawStartDate || rawEndDate || rawStartTime || rawEndTime,
+    );
+    if (!calendarScheduleProvided && !directScheduleProvided) {
+      return res.status(400).json({
+        error: "A battle date, start time, and end time are required.",
+      });
+    }
+    if (calendarScheduleProvided && directScheduleProvided) {
+      return res.status(400).json({
+        error:
+          "Provide either calendar schedule fields or start/end timestamps, not both.",
+      });
     }
 
     const roomLanguages = ["java"];
@@ -241,30 +314,46 @@ export async function createRoom(req, res) {
     // Validate each question
     for (let i = 0; i < questions.length; i++) {
       const q = questions[i];
-      if (!q.title || !q.description) {
+      if (
+        !q ||
+        typeof q.title !== "string" ||
+        !q.title.trim() ||
+        typeof q.description !== "string" ||
+        !q.description.trim()
+      ) {
         return res.status(400).json({
           error: `Question ${i + 1} must have a title and description.`,
         });
       }
-      if (!q.visibleTestCases || q.visibleTestCases.length === 0) {
+      if (!Array.isArray(q.visibleTestCases) || q.visibleTestCases.length < 3) {
         return res.status(400).json({
-          error: `Question ${i + 1} must have at least one visible test case.`,
+          error: `Question ${i + 1} must have at least three visible test cases.`,
         });
       }
-      if (!q.hiddenTestCases || q.hiddenTestCases.length === 0) {
+      if (!Array.isArray(q.hiddenTestCases) || q.hiddenTestCases.length === 0) {
         return res.status(400).json({
           error: `Question ${i + 1} must have at least one hidden test case.`,
         });
       }
       for (const tc of q.visibleTestCases) {
-        if (!tc.input || tc.expectedOutput === undefined) {
+        if (
+          !tc ||
+          typeof tc.input !== "string" ||
+          tc.expectedOutput === undefined ||
+          tc.expectedOutput === null
+        ) {
           return res.status(400).json({
             error: `Question ${i + 1} has invalid visible test case format.`,
           });
         }
       }
       for (const tc of q.hiddenTestCases) {
-        if (!tc.input || tc.expectedOutput === undefined) {
+        if (
+          !tc ||
+          typeof tc.input !== "string" ||
+          tc.expectedOutput === undefined ||
+          tc.expectedOutput === null
+        ) {
           return res.status(400).json({
             error: `Question ${i + 1} has invalid hidden test case format.`,
           });
@@ -319,8 +408,8 @@ export async function createRoom(req, res) {
       }
 
       processedQuestions.push({
-        title: q.title,
-        description: q.description,
+        title: q.title.trim(),
+        description: q.description.trim(),
         explanation: q.explanation || "",
         constraints: q.constraints || "",
         difficulty: q.difficulty || "MEDIUM",
@@ -331,7 +420,6 @@ export async function createRoom(req, res) {
         signature: signature,
         starterCode:
           q.starterCode ||
-          starterCodeByLanguage["python"] ||
           starterCodeByLanguage["java"] ||
           "",
         starterCodeByLanguage, // Will be populated on read with fresh starters
@@ -352,7 +440,7 @@ export async function createRoom(req, res) {
         functionName,
         expectedOutputSource: q.expectedOutputSource || "manual",
         referenceSolution: q.referenceSolution || "",
-        referenceSolutionLanguage: q.referenceSolutionLanguage || "python",
+        referenceSolutionLanguage: "java",
         wrapperByLanguage: q.wrapperByLanguage || {},
       });
     }
@@ -360,19 +448,51 @@ export async function createRoom(req, res) {
     const now = new Date();
 
     // Parse scheduled start/end into UTC Date objects using the shared helper
-    const { start: parsedStartTime, end: parsedEndTime } = parseSchedule({
-      startTime: rawStartTime || null,
-      endTime: rawEndTime || null,
-      scheduledDate: scheduledDate || null,
-      scheduledStartTime: scheduledStartTime || null,
-      scheduledEndTime: scheduledEndTime || null,
-      timezone: timezone || "UTC",
-      durationMinutes,
-    });
+    let parsedStartTime;
+    let parsedEndTime;
+    try {
+      ({ start: parsedStartTime, end: parsedEndTime } = parseSchedule({
+        startDate: rawStartDate || null,
+        endDate: rawEndDate || null,
+        startTime: rawStartTime || null,
+        endTime: rawEndTime || null,
+        scheduledDate: scheduledDate || null,
+        scheduledStartTime: scheduledStartTime || null,
+        scheduledEndTime: scheduledEndTime || null,
+        timezone: timezone || "UTC",
+        durationMinutes: 1,
+      }));
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    const scheduledDurationMinutes = Math.ceil(
+      (parsedEndTime.getTime() - parsedStartTime.getTime()) / 60000,
+    );
+    if (scheduledDurationMinutes < 1 || scheduledDurationMinutes > 2000 * 10080) {
+      return res.status(400).json({
+        error: "Scheduled battle duration is outside the supported range.",
+      });
+    }
+    const durationUnits = [
+      { unit: "weeks", minutes: 10080 },
+      { unit: "days", minutes: 1440 },
+      { unit: "hours", minutes: 60 },
+      { unit: "minutes", minutes: 1 },
+    ];
+    const duration = durationUnits.find(
+      ({ minutes }) =>
+        scheduledDurationMinutes % minutes === 0 &&
+        scheduledDurationMinutes / minutes <= 2000,
+    );
+    const tValue = duration
+      ? scheduledDurationMinutes / duration.minutes
+      : scheduledDurationMinutes;
+    const tUnit = duration?.unit || "minutes";
 
     const room = new BattleRoom({
       roomCode,
-      title,
+      title: title.trim(),
       description: description || "",
       createdBy: userId,
       questions: processedQuestions,
@@ -380,6 +500,7 @@ export async function createRoom(req, res) {
       timeLimit: tValue,
       timeLimitUnit: tUnit,
       status: "UPCOMING",
+      isScheduled: true,
       maxParticipants: maxParticipants || 100,
       moderationAction:
         moderationAction === "DISQUALIFY" ? "DISQUALIFY" : "FLAG",
@@ -391,6 +512,8 @@ export async function createRoom(req, res) {
       timezone: timezone || "UTC",
       startTime: parsedStartTime || null,
       endTime: parsedEndTime || null,
+      startDate: parsedStartTime || null,
+      endDate: parsedEndTime || null,
       expiresAt: new Date(now.getTime() + ONE_YEAR_MS),
     });
 
@@ -415,7 +538,7 @@ function attachFreshStartersToQuestion(q) {
     const freshStarters = generateFreshStarters(q);
     q.starterCodeByLanguage = freshStarters;
     q.starterCode =
-      freshStarters[q.starterCodeLanguage || "python"] ||
+      freshStarters["java"] ||
       freshStarters["java"] ||
       q.starterCode ||
       "";
@@ -442,7 +565,6 @@ export async function reuseRoom(req, res) {
       timeLimit,
       timeLimitUnit,
       maxParticipants,
-      languages,
       moderationAction,
       allowLeaderboard,
       allowReuse,
@@ -458,15 +580,22 @@ export async function reuseRoom(req, res) {
       timeLimit: timeLimit || source.timeLimit,
       timeLimitUnit: timeLimitUnit || source.timeLimitUnit,
       maxParticipants: maxParticipants || source.maxParticipants,
-      languages:
-        Array.isArray(languages) && languages.length
-          ? languages
-          : source.languages,
+      languages: ["java"],
       moderationAction:
         moderationAction === "DISQUALIFY" ? "DISQUALIFY" : "FLAG",
       allowLeaderboard: allowLeaderboard !== false,
       allowReuse: allowReuse !== false,
       status: "UPCOMING",
+      endDate: new Date(
+        Date.now() +
+          (timeLimit || source.timeLimit) *
+            ({
+              minutes: 60_000,
+              hours: 3_600_000,
+              days: 86_400_000,
+              weeks: 604_800_000,
+            }[timeLimitUnit || source.timeLimitUnit] || 60_000),
+      ),
       expiresAt: new Date(Date.now() + ONE_YEAR_MS),
     });
     await room.save();
@@ -485,6 +614,20 @@ export async function startRoom(req, res) {
   try {
     const { roomCode } = req.params;
     const userId = req.userId;
+    const organization =
+      typeof req.body?.organization === "string"
+        ? req.body.organization.trim()
+        : "";
+
+    if (
+      organization.length < 2 ||
+      organization.length > 120 ||
+      /[\u0000-\u001f\u007f]/.test(organization)
+    ) {
+      return res.status(400).json({
+        error: "A valid organization (2-120 characters) is required to start.",
+      });
+    }
 
     const room = await BattleRoom.findOne({
       roomCode: roomCode.toUpperCase(),
@@ -501,6 +644,13 @@ export async function startRoom(req, res) {
         .json({ error: "Only the room creator can start the battle." });
     }
 
+    if (hasScheduledWindow(room)) {
+      return res.status(400).json({
+        error:
+          "This battle is scheduled to run at its configured start and end times.",
+      });
+    }
+
     if (room.status !== "UPCOMING") {
       return res
         .status(400)
@@ -512,7 +662,10 @@ export async function startRoom(req, res) {
     room.status = "ACTIVE";
     room.startTime = now;
     room.endTime = new Date(now.getTime() + durationMinutes * 60 * 1000);
+    room.startDate = room.startTime;
+    room.endDate = room.endTime;
     await room.save();
+    warmUpJudgeEngine();
 
     // Auto-join the creator so they can submit solutions and get a score.
     const existingCreatorSubmission = await BattleRoomSubmission.findOne({
@@ -524,7 +677,7 @@ export async function startRoom(req, res) {
         roomId: room._id,
         userId,
         participantName: req.user?.name || "Participant",
-        participantOrganization: req.user?.organization || "Unspecified",
+        participantOrganization: organization,
         questionResults: room.questions.map((q) => ({
           questionId: q._id,
           questionTitle: q.title,
@@ -608,6 +761,16 @@ export async function getRoomByCode(req, res) {
       userId,
     }).lean();
     const isParticipant = !!userSubmission;
+    if (!isCreator && !isParticipant) {
+      return res.status(403).json({
+        error:
+          "Join from the Battle Room page and enter your organization before accessing this battle.",
+        code: "ROOM_JOIN_REQUIRED",
+      });
+    }
+    if (windowState.state === ROOM_WINDOW_STATE.ACTIVE) {
+      warmUpJudgeEngine();
+    }
 
     const roomData = isCreator ? room.toCreatorJSON() : room.toPublicJSON();
 
@@ -643,16 +806,39 @@ export async function getRoomByCode(req, res) {
 
 export async function joinRoom(req, res) {
   try {
-    const { roomCode, name, organization } = req.body;
+    const { roomCode } = req.body;
     const userId = req.userId;
+    const name = req.user?.name;
+    const organization =
+      typeof req.body?.organization === "string"
+        ? req.body.organization.trim()
+        : "";
+    const email = req.user?.email;
 
     if (!roomCode) {
       return res.status(400).json({ error: "Room key is required." });
     }
-    if (!String(name || "").trim() || !String(organization || "").trim()) {
-      return res
-        .status(400)
-        .json({ error: "Name and organisation are required." });
+    if (organization.length < 2 || organization.length > 120) {
+      return res.status(400).json({
+        error: "Organization must be between 2 and 120 characters.",
+      });
+    }
+    if (/[\u0000-\u001f\u007f]/.test(organization)) {
+      return res.status(400).json({
+        error: "Organization contains invalid characters.",
+      });
+    }
+    if (
+      !userId ||
+      req.tokenPayload?.guest === true ||
+      !req.user?.isVerified ||
+      !String(name || "").trim()
+    ) {
+      return res.status(401).json({ error: "An authenticated account is required." });
+    }
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      return res.status(400).json({ error: "A valid email address is required." });
     }
 
     const room = await BattleRoom.findOne({
@@ -688,10 +874,6 @@ export async function joinRoom(req, res) {
       });
     }
 
-    if (room.participantCount >= room.maxParticipants) {
-      return res.status(400).json({ error: "Battle room is full." });
-    }
-
     const existingSubmission = await BattleRoomSubmission.findOne({
       roomId: room._id,
       userId,
@@ -709,11 +891,43 @@ export async function joinRoom(req, res) {
     }
 
     if (!existingSubmission) {
+      const reservedRoom = await BattleRoom.findOneAndUpdate(
+        {
+          _id: room._id,
+          isActive: true,
+          isDeleted: false,
+          participants: { $ne: normalizedEmail },
+          $expr: {
+            $lt: [
+              { $ifNull: ["$participantCount", 0] },
+              { $ifNull: ["$maxParticipants", 100] },
+            ],
+          },
+        },
+        {
+          $addToSet: { participants: normalizedEmail },
+          $inc: { participantCount: 1 },
+        },
+        { new: true },
+      );
+      if (!reservedRoom) {
+        const emailAlreadyJoined = (room.participants || []).some(
+          (participantEmail) =>
+            participantEmail.toLowerCase() === normalizedEmail,
+        );
+        return res.status(400).json({
+          error: emailAlreadyJoined
+            ? "This email address has already joined the room."
+            : "Battle room is full.",
+        });
+      }
+
       const submission = new BattleRoomSubmission({
         roomId: room._id,
         userId,
+        participantEmail: normalizedEmail,
         participantName: String(name).trim(),
-        participantOrganization: String(organization).trim(),
+        participantOrganization: organization,
         questionResults: room.questions.map((q) => ({
           questionId: q._id,
           questionTitle: q.title,
@@ -728,11 +942,20 @@ export async function joinRoom(req, res) {
         startTime: new Date(),
       });
 
-      await submission.save();
-      await BattleRoom.findByIdAndUpdate(room._id, {
-        $inc: { participantCount: 1 },
-      });
+      try {
+        await submission.save();
+      } catch (error) {
+        await BattleRoom.updateOne(
+          { _id: room._id, participants: normalizedEmail },
+          {
+            $pull: { participants: normalizedEmail },
+            $inc: { participantCount: -1 },
+          },
+        );
+        throw error;
+      }
     }
+    warmUpJudgeEngine();
 
     return res.status(200).json({
       message: "Successfully joined the battle room!",
@@ -770,16 +993,28 @@ export async function runQuestionSolution(req, res) {
       { roomCode: roomCode.toUpperCase(), isActive: true, isDeleted: false },
       {
         roomCode: 1,
+        createdBy: 1,
         status: 1,
         isDeleted: 1,
         startTime: 1,
         endTime: 1,
-        languages: 1,
         questions: 1,
       },
     ).lean();
     if (!room) {
       return res.status(404).json({ error: "Battle room not found." });
+    }
+
+    const isCreator = room.createdBy?.toString() === userId?.toString();
+    if (
+      !isCreator &&
+      !(await BattleRoomSubmission.exists({ roomId: room._id, userId }))
+    ) {
+      return res.status(403).json({
+        error:
+          "Join from the Battle Room page and enter your organization before running code.",
+        code: "ROOM_JOIN_REQUIRED",
+      });
     }
 
     // Server-authoritative window check. Blocks runs before the start time and
@@ -797,18 +1032,11 @@ export async function runQuestionSolution(req, res) {
       });
     }
 
-    const lang = language || "java";
+    const lang = String(language || "java").toLowerCase();
     if (!isValidLanguage(lang)) {
       return res.status(400).json({
         error: "Only Java is supported in battle rooms.",
       });
-    }
-
-    const roomLangs = room.languages || ["all"];
-    if (!roomLangs.includes("all") && !roomLangs.includes(lang)) {
-      return res
-        .status(400)
-        .json({ error: `Language "${lang}" is not allowed for this battle.` });
     }
 
     const question = room.questions.find(
@@ -821,8 +1049,9 @@ export async function runQuestionSolution(req, res) {
     }
 
     const visibleTestCases = (question.visibleTestCases || [])
-      .filter((tc) => tc.input)
+      .filter((tc) => tc.input !== undefined && tc.input !== null)
       .map((tc) => ({
+        ...(tc._id ? { _id: tc._id } : {}),
         input: tc.input,
         expectedOutput: tc.expectedOutput ?? "",
         description: tc.description || "",
@@ -854,31 +1083,47 @@ export async function runQuestionSolution(req, res) {
       );
     }
 
-    const runResults = (executionResult.results || []).map((r) => ({
-      testCase: r.testCase,
+    if (!isCodeExecutionAllowed(room)) {
+      const win = getRoomWindowState(room);
+      return res.status(403).json({
+        error: "The scheduled battle window ended while your code was running.",
+        windowState: win.state,
+        serverTime: win.now.toISOString(),
+      });
+    }
+
+    const runResults = (executionResult.results || []).map((r, index) => ({
+      ...(r.testCaseId ? { testCaseId: r.testCaseId } : {}),
+      testCase: r.testCase ?? index + 1,
+      input: r.input ?? visibleTestCases[index]?.input ?? "",
       status: r.status,
-      executionTime: r.executionTime || 0,
-      memoryUsed: r.memoryUsed || 0,
-      output: r.output || "",
+      executionTime: r.executionTime ?? 0,
+      memoryUsed: r.memoryUsed ?? 0,
+      output: r.output ?? "",
       expectedOutput: r.expectedOutput ?? "",
+      error: r.error ?? "",
       isHidden: false,
     }));
-    const visiblePassed = runResults.filter(
-      (r) => r.status === "PASSED",
-    ).length;
-    const visibleFailed = runResults.filter(
-      (r) => r.status !== "PASSED",
-    ).length;
+    const visiblePassed = runResults.length
+      ? runResults.filter(
+      (r) => r.status === "PASSED" || r.status === "ACCEPTED",
+        ).length
+      : Math.min(visibleTestCases.length, executionResult.passed || 0);
+    const visibleFailed = runResults.length
+      ? runResults.filter(
+      (r) => r.status !== "PASSED" && r.status !== "ACCEPTED",
+        ).length
+      : Math.min(visibleTestCases.length - visiblePassed, executionResult.failed || 0);
 
     return res.status(200).json({
-      status: "RUN_COMPLETED",
+      status: executionResult.status,
       passed: executionResult.passed || 0,
       failed: executionResult.failed || 0,
       total: executionResult.total || visibleTestCases.length,
-      output: executionResult.output || "",
-      error: executionResult.error || "",
-      executionTime: executionResult.executionTime || 0,
-      memoryUsed: executionResult.memoryUsed || 0,
+      output: executionResult.output ?? "",
+      error: executionResult.error ?? "",
+      executionTime: executionResult.executionTime ?? 0,
+      memoryUsed: executionResult.memoryUsed ?? 0,
       visiblePassed,
       visibleFailed,
       results: runResults,
@@ -920,7 +1165,6 @@ export async function submitQuestionSolution(req, res) {
         isDeleted: 1,
         startTime: 1,
         endTime: 1,
-        languages: 1,
         questions: 1,
       },
     ).lean();
@@ -943,18 +1187,11 @@ export async function submitQuestionSolution(req, res) {
       });
     }
 
-    const lang = language || "java";
+    const lang = String(language || "java").toLowerCase();
     if (!isValidLanguage(lang)) {
       return res.status(400).json({
         error: "Only Java is supported in battle rooms.",
       });
-    }
-
-    const roomLangs = room.languages || ["all"];
-    if (!roomLangs.includes("all") && !roomLangs.includes(lang)) {
-      return res
-        .status(400)
-        .json({ error: `Language "${lang}" is not allowed for this battle.` });
     }
 
     // Read-only snapshot of the submission for validation + position lookup.
@@ -1010,10 +1247,12 @@ export async function submitQuestionSolution(req, res) {
 
     const allTestCases = [
       ...question.visibleTestCases.map((tc) => ({
+        ...(tc._id ? { _id: tc._id } : {}),
         input: tc.input,
         expectedOutput: tc.expectedOutput,
       })),
       ...question.hiddenTestCases.map((tc) => ({
+        ...(tc._id ? { _id: tc._id } : {}),
         input: tc.input,
         expectedOutput: tc.expectedOutput,
       })),
@@ -1040,21 +1279,32 @@ export async function submitQuestionSolution(req, res) {
       );
     }
 
+    if (!isCodeExecutionAllowed(room)) {
+      const win = getRoomWindowState(room);
+      return res.status(403).json({
+        error: "The scheduled battle window ended while your code was running.",
+        windowState: win.state,
+        serverTime: win.now.toISOString(),
+      });
+    }
+
     const visibleCount = question.visibleTestCases.length;
     const hiddenCount = question.hiddenTestCases.length;
     const totalCount = visibleCount + hiddenCount;
 
-    const passedCount = executionResult.results.filter(
-      (r) => r.status === "PASSED",
-    ).length;
+    const passedCount =
+      executionResult.status === "SYSTEM_ERROR"
+        ? 0
+        : executionResult.results.filter(
+            (r) => r.status === "PASSED" || r.status === "ACCEPTED",
+          ).length;
     const failedCount = totalCount - passedCount;
 
-    // Score is based on visible test cases passing — full visible pass = full
-    // question points. Hidden test cases still count toward the breakdown.
-    const visiblePassed = executionResult.results
-      .slice(0, visibleCount)
-      .filter((r) => r.status === "PASSED").length;
-    const questionScore = question.points * (visiblePassed / visibleCount);
+    const questionScore = calculateQuestionScore(
+      question.points,
+      passedCount,
+      totalCount,
+    );
 
     // Keep the submitted source with the result so the room owner can audit
     // the complete battle record after the battle.
@@ -1063,69 +1313,68 @@ export async function submitQuestionSolution(req, res) {
       questionTitle: question.title,
       code,
       language: lang,
-      status: executionResult.accepted ? "ACCEPTED" : "REJECTED",
+      status: executionResult.status,
       score: Math.round(questionScore * 100) / 100,
       passed: passedCount,
       failed: failedCount,
       total: totalCount,
-      executionTime: executionResult.executionTime || 0,
-      memoryUsed: executionResult.memoryUsed || 0,
+      executionTime: executionResult.executionTime ?? 0,
+      memoryUsed: executionResult.memoryUsed ?? 0,
       timeToSolve,
-      output: executionResult.output || "",
-      error: executionResult.error || "",
+      output: executionResult.output ?? "",
+      error: executionResult.error ?? "",
       results: executionResult.results.map((r, idx) => ({
-        testCase: idx + 1,
+        ...(r.testCaseId ? { testCaseId: r.testCaseId } : {}),
+        testCase: r.testCase ?? idx + 1,
+        input: r.input ?? allTestCases[idx]?.input ?? "",
         status: r.status,
-        executionTime: r.executionTime || 0,
-        memoryUsed: r.memoryUsed || 0,
-        output: r.output || "",
-        expectedOutput: idx < visibleCount ? r.expectedOutput : "",
+        executionTime: r.executionTime ?? 0,
+        memoryUsed: r.memoryUsed ?? 0,
+        output: r.output ?? "",
+        expectedOutput: idx < visibleCount
+          ? (r.expectedOutput ?? allTestCases[idx]?.expectedOutput ?? "")
+          : "",
+        error: r.error ?? "",
         isHidden: idx >= visibleCount,
       })),
     };
 
     const hiddenResults = executionResult.results.slice(visibleCount);
-    const hiddenPassed = hiddenResults.filter(
-      (r) => r.status === "PASSED",
-    ).length;
-    const hiddenFailed = hiddenResults.length - hiddenPassed;
+    const visibleResults = executionResult.results.slice(0, visibleCount);
+    const visiblePassedCount = visibleResults.length
+      ? visibleResults.filter(
+          (r) => r.status === "PASSED" || r.status === "ACCEPTED",
+        ).length
+      : Math.min(visibleCount, passedCount);
+    const visibleFailedCount = visibleCount - visiblePassedCount;
+    const hiddenPassed = hiddenResults.length
+      ? hiddenResults.filter(
+          (r) => r.status === "PASSED" || r.status === "ACCEPTED",
+        ).length
+      : Math.min(hiddenCount, Math.max(0, passedCount - visiblePassedCount));
+    const hiddenFailed = hiddenResults.length
+      ? hiddenResults.length - hiddenPassed
+      : Math.min(hiddenCount, Math.max(0, failedCount - visibleFailedCount));
 
-    // Recompute totals from the snapshot (fresh lean doc) + this question.
+    // Compute deltas from the question snapshot; $inc preserves updates from
+    // concurrent submissions to other questions in the same room.
     const qrResults = [...submission.questionResults];
+    const previousQuestionResult = qrResults[qrIndex];
     qrResults[qrIndex] = qr;
-    const newTotalScore = qrResults.reduce((sum, q) => sum + (q.score || 0), 0);
-    const newTotalPassed = qrResults.reduce(
-      (sum, q) => sum + (q.passed || 0),
-      0,
-    );
-    const newTotalFailed = qrResults.reduce(
-      (sum, q) => sum + (q.failed || 0),
-      0,
-    );
-
-    const allCompleted = qrResults.every((q) => q.status !== "PENDING");
 
     const lines = code.split("\n").length;
-    const codingBehavior = submission.codingBehavior || {};
-    const totalEdits = (codingBehavior.totalEdits || 0) + 1;
 
     // Build the atomic update operator.
     const update = {
       $set: {
         [`questionResults.${qrIndex}`]: qr,
-        totalScore: newTotalScore,
-        totalPassed: newTotalPassed,
-        totalFailed: newTotalFailed,
-        ...(allCompleted
-          ? { status: "COMPLETED", submittedAt: new Date() }
-          : {}),
       },
       $inc: {
+        totalScore: qr.score - (previousQuestionResult.score || 0),
+        totalPassed: qr.passed - (previousQuestionResult.passed || 0),
+        totalFailed: qr.failed - (previousQuestionResult.failed || 0),
         "codingBehavior.totalLinesWritten": lines,
         "codingBehavior.totalEdits": 1,
-      },
-      $addToSet: {
-        "codingBehavior.languagesUsed": lang,
       },
     };
 
@@ -1134,7 +1383,15 @@ export async function submitQuestionSolution(req, res) {
     // this filter matches nothing and we return a clean conflict instead of
     // crashing with a VersionError.
     const result = await BattleRoomSubmission.updateOne(
-      { _id: submission._id, status: { $in: ["PENDING", "PROCESSING"] } },
+      {
+        _id: submission._id,
+        status: { $in: ["PENDING", "PROCESSING"] },
+        [`questionResults.${qrIndex}.status`]: previousQuestionResult.status,
+        [`questionResults.${qrIndex}.score`]: previousQuestionResult.score || 0,
+        [`questionResults.${qrIndex}.passed`]: previousQuestionResult.passed || 0,
+        [`questionResults.${qrIndex}.failed`]: previousQuestionResult.failed || 0,
+        [`questionResults.${qrIndex}.code`]: previousQuestionResult.code || "",
+      },
       update,
     );
 
@@ -1151,6 +1408,51 @@ export async function submitQuestionSolution(req, res) {
         status: current?.status || "CONFLICT",
         totalScore: current?.totalScore || 0,
       });
+    }
+
+    let currentSubmission = await BattleRoomSubmission.findById(
+      submission._id,
+      {
+        status: 1,
+        totalScore: 1,
+        totalPassed: 1,
+        totalFailed: 1,
+        questionResults: 1,
+      },
+    ).lean();
+    if (!currentSubmission) {
+      return res.status(404).json({ error: "Submission no longer exists." });
+    }
+    const allCompleted = currentSubmission.questionResults.every(
+      (questionResult) =>
+        !["PENDING", "PROCESSING"].includes(questionResult.status),
+    );
+    if (allCompleted) {
+      await BattleRoomSubmission.updateOne(
+        {
+          _id: submission._id,
+          status: { $in: ["PENDING", "PROCESSING"] },
+          questionResults: {
+            $not: {
+              $elemMatch: { status: { $in: ["PENDING", "PROCESSING"] } },
+            },
+          },
+        },
+        { $set: { status: "COMPLETED", submittedAt: new Date() } },
+      );
+      currentSubmission = await BattleRoomSubmission.findById(
+        submission._id,
+        {
+          status: 1,
+          totalScore: 1,
+          totalPassed: 1,
+          totalFailed: 1,
+          questionResults: 1,
+        },
+      ).lean();
+    }
+    if (!currentSubmission) {
+      return res.status(404).json({ error: "Submission no longer exists." });
     }
 
     // SECURITY: never expose hidden test case inputs, expected outputs, or
@@ -1170,10 +1472,6 @@ export async function submitQuestionSolution(req, res) {
           }
         : r,
     );
-    const visiblePassedCount = qr.results
-      .slice(0, visibleCount)
-      .filter((r) => r.status === "PASSED").length;
-
     return res.status(200).json({
       message: "Solution submitted!",
       questionResult: {
@@ -1208,10 +1506,10 @@ export async function submitQuestionSolution(req, res) {
       memoryUsed: qr.memoryUsed,
       hiddenPassed,
       hiddenFailed,
-      totalScore: newTotalScore,
-      totalPassed: newTotalPassed,
-      totalFailed: newTotalFailed,
-      submissionStatus: allCompleted ? "COMPLETED" : submission.status,
+      totalScore: currentSubmission.totalScore,
+      totalPassed: currentSubmission.totalPassed,
+      totalFailed: currentSubmission.totalFailed,
+      submissionStatus: currentSubmission.status,
       allCompleted,
     });
   } catch (error) {
@@ -1329,6 +1627,8 @@ export async function disqualifyRoomSubmission(req, res) {
           disqualifyReason: reason || "Proctoring violation detected",
           questionResults,
           "codingBehavior.completedEarly": false,
+          "resultDelivery.status": "SKIPPED",
+          "resultDelivery.error": "Disqualified submissions do not receive result emails.",
         },
       },
     );
@@ -1387,33 +1687,18 @@ export async function endTest(req, res) {
       });
     }
 
-    // Recompute totals from the current questionResults.
-    const qrResults = submission.questionResults || [];
-    const newTotalScore = qrResults.reduce((sum, q) => sum + (q.score || 0), 0);
-    const newTotalPassed = qrResults.reduce(
-      (sum, q) => sum + (q.passed || 0),
-      0,
-    );
-    const newTotalFailed = qrResults.reduce(
-      (sum, q) => sum + (q.failed || 0),
-      0,
-    );
-
     const totalTime = Math.max(
       1,
       Math.floor((new Date() - submission.startTime) / 1000),
     );
     const totalEdits = submission.codingBehavior?.totalEdits || 0;
 
-    await BattleRoomSubmission.updateOne(
+    const finalized = await BattleRoomSubmission.updateOne(
       { _id: submission._id, status: { $in: ["PENDING", "PROCESSING"] } },
       {
         $set: {
           status: "COMPLETED",
           submittedAt: new Date(),
-          totalScore: newTotalScore,
-          totalPassed: newTotalPassed,
-          totalFailed: newTotalFailed,
           "codingBehavior.timePerQuestion":
             submission.totalQuestions > 0
               ? totalTime / submission.totalQuestions
@@ -1425,13 +1710,39 @@ export async function endTest(req, res) {
         },
       },
     );
+    if (finalized.matchedCount === 0) {
+      const current = await BattleRoomSubmission.findById(
+        submission._id,
+        { status: 1, totalScore: 1, totalPassed: 1, totalFailed: 1 },
+      ).lean();
+      if (
+        !current ||
+        !["COMPLETED", "DISQUALIFIED"].includes(current.status)
+      ) {
+        return res.status(409).json({
+          error: "Your submission changed while the test was ending.",
+        });
+      }
+      return res.status(200).json({
+        message: "Test already finalized.",
+        status: current.status,
+        totalScore: current.totalScore || 0,
+        totalPassed: current.totalPassed || 0,
+        totalFailed: current.totalFailed || 0,
+      });
+    }
+
+    const current = await BattleRoomSubmission.findById(
+      submission._id,
+      { status: 1, totalScore: 1, totalPassed: 1, totalFailed: 1 },
+    ).lean();
 
     return res.status(200).json({
       message: "Test ended. Your score has been finalized.",
-      status: "COMPLETED",
-      totalScore: newTotalScore,
-      totalPassed: newTotalPassed,
-      totalFailed: newTotalFailed,
+      status: current.status,
+      totalScore: current.totalScore || 0,
+      totalPassed: current.totalPassed || 0,
+      totalFailed: current.totalFailed || 0,
     });
   } catch (error) {
     console.error("End test error:", error.message);
@@ -1454,67 +1765,55 @@ export async function getRoomLeaderboard(req, res) {
     }
 
     const isCreator = room.createdBy.toString() === userId.toString();
-    if (room.status === "CLOSED" && !isCreator) {
+    if (
+      !isCreator &&
+      !(await BattleRoomSubmission.exists({ roomId: room._id, userId }))
+    ) {
       return res.status(403).json({
-        error: "This battle has ended and only the creator can view it.",
+        error: "Join this battle to view its leaderboard.",
       });
     }
-
     const submissions = await BattleRoomSubmission.find({
       roomId: room._id,
-      status: { $in: ["PENDING", "PROCESSING", "COMPLETED", "DISQUALIFIED"] },
+      status: { $in: RANKED_SUBMISSION_STATUSES },
     })
-      .populate("userId", "name email organization")
+      .populate(
+        "userId",
+        isCreator ? "name email organization" : "name organization",
+      )
       .lean();
+    sortRoomSubmissions(submissions);
 
-    submissions.sort((a, b) => {
-      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
-      if (b.totalPassed !== a.totalPassed) return b.totalPassed - a.totalPassed;
-      if (a.totalFailed !== b.totalFailed) return a.totalFailed - b.totalFailed;
-      const aTime = a.questionResults.reduce(
-        (s, q) => s + (q.timeToSolve || 0),
-        0,
-      );
-      const bTime = b.questionResults.reduce(
-        (s, q) => s + (q.timeToSolve || 0),
-        0,
-      );
-      return aTime - bTime;
-    });
-
+    const totalTestCases = countRoomTestCases(room.questions);
     const leaderboard = submissions.map((sub, index) => {
-      const totalTime = sub.questionResults.reduce(
-        (s, q) => s + (q.timeToSolve || 0),
-        0,
-      );
-      const isCurrentUser = sub.userId?._id?.toString() === userId.toString();
-      // Privacy: emails and moderation internals are only visible to the room
-      // creator, or to the participant themselves. Other participants only see
-      // public ranking data.
-      const canSeePrivate = isCreator || isCurrentUser;
+      const totalTime = getRoomSubmissionTime(sub);
+      const submissionUserId = sub.userId?._id || sub.userId;
+      const isCurrentUser =
+        submissionUserId?.toString() === userId.toString();
       return {
         rank: index + 1,
-        userId: canSeePrivate ? sub.userId?._id : undefined,
+        userId: submissionUserId,
         name: sub.participantName || sub.userId?.name || "Unknown",
-        email: canSeePrivate ? sub.userId?.email || "" : undefined,
         organization:
           sub.participantOrganization || sub.userId?.organization || "Unknown",
         totalScore: sub.totalScore,
         totalPassed: sub.totalPassed,
         totalFailed: sub.totalFailed,
         totalQuestions: sub.totalQuestions,
+        totalTestCases,
         status: sub.status,
         submittedAt: sub.submittedAt,
         timeToSolve: totalTime,
-        disqualifyReason: canSeePrivate
-          ? sub.disqualifyReason || null
-          : undefined,
-        moderationFlags: canSeePrivate ? sub.moderationFlags || [] : undefined,
-        flagCount: canSeePrivate
-          ? (sub.moderationFlags || []).length
-          : undefined,
-        completedEarly: sub.codingBehavior?.completedEarly || false,
         isCurrentUser,
+        ...(isCreator
+          ? {
+              email: sub.userId?.email || "",
+              disqualifyReason: sub.disqualifyReason || null,
+              moderationFlags: sub.moderationFlags || [],
+              flagCount: (sub.moderationFlags || []).length,
+              completedEarly: sub.codingBehavior?.completedEarly || false,
+            }
+          : {}),
       };
     });
 
@@ -1564,23 +1863,9 @@ export async function getUserResult(req, res) {
 
     const allSubmissions = await BattleRoomSubmission.find({
       roomId: room._id,
-      status: { $in: ["COMPLETED", "DISQUALIFIED"] },
+      status: { $in: RANKED_SUBMISSION_STATUSES },
     }).lean();
-
-    allSubmissions.sort((a, b) => {
-      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
-      if (b.totalPassed !== a.totalPassed) return b.totalPassed - a.totalPassed;
-      if (a.totalFailed !== b.totalFailed) return a.totalFailed - b.totalFailed;
-      const aTime = a.questionResults.reduce(
-        (s, q) => s + (q.timeToSolve || 0),
-        0,
-      );
-      const bTime = b.questionResults.reduce(
-        (s, q) => s + (q.timeToSolve || 0),
-        0,
-      );
-      return aTime - bTime;
-    });
+    sortRoomSubmissions(allSubmissions);
 
     const rank =
       allSubmissions.findIndex(
@@ -1632,73 +1917,19 @@ export async function closeRoom(req, res) {
       return res.status(400).json({ error: "Battle room is already closed." });
     }
 
-    const pendingSubmissions = await BattleRoomSubmission.find({
-      roomId: room._id,
-      status: "PENDING",
-    }).lean();
-
-    for (const sub of pendingSubmissions) {
-      const totalTime = Math.max(
-        1,
-        Math.floor((new Date() - sub.startTime) / 1000),
-      );
-      await BattleRoomSubmission.updateOne(
-        { _id: sub._id, status: "PENDING" },
-        {
-          $set: {
-            status: "COMPLETED",
-            submittedAt: new Date(),
-            "codingBehavior.timePerQuestion":
-              sub.totalQuestions > 0 ? totalTime / sub.totalQuestions : 0,
-            "codingBehavior.editFrequency":
-              (sub.codingBehavior?.totalEdits || 0) > 0
-                ? (sub.codingBehavior.totalEdits || 0) / (totalTime / 60)
-                : 0,
-            "codingBehavior.completedEarly": false,
-          },
-        },
-      );
-    }
-
-    room.status = "CLOSED";
-    await room.save();
-
-    const allSubmissions = await BattleRoomSubmission.find({
-      roomId: room._id,
-      status: "COMPLETED",
-    })
-      .populate("userId", "name email")
-      .lean();
-
-    allSubmissions.sort((a, b) => b.totalScore - a.totalScore);
-    const totalParticipants = allSubmissions.length;
-
-    for (let i = 0; i < allSubmissions.length; i++) {
-      const sub = allSubmissions[i];
-      const user = sub.userId;
-      if (user && user.email) {
-        sendBattleRoomResultEmail({
-          email: user.email,
-          userName: user.name,
-          roomTitle: room.title,
-          totalScore: sub.totalScore,
-          totalPassed: sub.totalPassed,
-          totalQuestions: sub.totalQuestions,
-          codingBehavior: sub.codingBehavior,
-          rank: i + 1,
-          totalParticipants,
-          roomCode: room.roomCode,
-        }).catch((err) => {
-          console.error(`Failed to send email to ${user.email}:`, err.message);
-        });
-      }
+    const result = await closeBattleRoomAndNotify(room._id);
+    if (!result.closed) {
+      return res.status(409).json({ error: "Battle room is already closed." });
     }
 
     return res.status(200).json({
       message:
-        "Battle room closed! Results have been sent to all participants via email.",
-      totalParticipants,
-      emailsSent: allSubmissions.length,
+        result.emailFailures > 0
+          ? "Battle room closed. Some result emails could not be delivered."
+          : "Battle room closed! Results have been sent to participants via email.",
+      totalParticipants: result.totalParticipants,
+      emailsSent: result.emailsSent,
+      emailFailures: result.emailFailures,
     });
   } catch (error) {
     console.error("Close battle room error:", error.message);
@@ -1706,9 +1937,88 @@ export async function closeRoom(req, res) {
   }
 }
 
+export async function getRoomResultDelivery(req, res) {
+  try {
+    const room = await BattleRoom.findOne({
+      roomCode: req.params.roomCode.toUpperCase(),
+      createdBy: req.userId,
+      isActive: true,
+      isDeleted: false,
+    }).select("_id status");
+    if (!room) {
+      return res.status(404).json({ error: "Battle room not found." });
+    }
+
+    const submissions = await BattleRoomSubmission.find({
+      roomId: room._id,
+      status: "COMPLETED",
+    })
+      .select("participantName resultDelivery.status resultDelivery.attempts resultDelivery.attemptedAt resultDelivery.sentAt resultDelivery.error")
+      .sort({ totalScore: -1, totalPassed: -1, submittedAt: 1, _id: 1 })
+      .lean();
+    const participants = submissions.map((submission) => ({
+      name: submission.participantName,
+      status: submission.resultDelivery?.status || "PENDING",
+      attempts: submission.resultDelivery?.attempts || 0,
+      attemptedAt: submission.resultDelivery?.attemptedAt || null,
+      sentAt: submission.resultDelivery?.sentAt || null,
+      error: submission.resultDelivery?.error || "",
+    }));
+    const counts = participants.reduce(
+      (summary, participant) => {
+        summary[participant.status] = (summary[participant.status] || 0) + 1;
+        return summary;
+      },
+      {},
+    );
+
+    return res.status(200).json({
+      roomStatus: room.status,
+      totalParticipants: participants.length,
+      counts,
+      participants,
+    });
+  } catch (error) {
+    console.error("Get result delivery status error:", error.message);
+    return res.status(500).json({ error: "Failed to get result delivery status." });
+  }
+}
+
+export async function retryRoomResultDelivery(req, res) {
+  try {
+    const room = await BattleRoom.findOne({
+      roomCode: req.params.roomCode.toUpperCase(),
+      createdBy: req.userId,
+      isActive: true,
+      isDeleted: false,
+    }).select("_id status");
+    if (!room) {
+      return res.status(404).json({ error: "Battle room not found." });
+    }
+    if (room.status !== "CLOSED") {
+      return res.status(409).json({
+        error: "Results can be delivered only after the room is closed.",
+      });
+    }
+
+    const result = await retryBattleRoomResultDelivery(room._id);
+    return res.status(200).json({
+      message:
+        result.emailFailures > 0
+          ? "Delivery retry finished; some participant emails still failed."
+          : "Delivery retry finished.",
+      ...result,
+    });
+  } catch (error) {
+    console.error("Retry result delivery error:", error.message);
+    return res.status(500).json({ error: "Failed to retry result delivery." });
+  }
+}
+
 export async function getLeaderboardByRoomCodePublic(req, res) {
   try {
     const { roomCode } = req.params;
+    const userId = req.userId;
 
     const room = await BattleRoom.findOne({
       roomCode: roomCode.toUpperCase(),
@@ -1719,10 +2029,9 @@ export async function getLeaderboardByRoomCodePublic(req, res) {
       return res.status(404).json({ error: "Battle room not found." });
     }
 
-    if (room.status === "CLOSED") {
+    if (room.createdBy.toString() !== userId.toString()) {
       return res.status(403).json({
-        error:
-          "This battle has ended and the leaderboard is only available to the creator.",
+        error: "Only the room creator can view the full leaderboard.",
       });
     }
 
@@ -1745,13 +2054,19 @@ export async function getLeaderboardByRoomCodePublic(req, res) {
         (s, q) => s + (q.timeToSolve || 0),
         0,
       );
-      return aTime - bTime;
+      const timeDifference = aTime - bTime;
+      if (timeDifference !== 0) return timeDifference;
+      return (a.participantName || a.userId?.name || "").localeCompare(
+        b.participantName || b.userId?.name || "",
+        undefined,
+        { sensitivity: "base" },
+      );
     });
 
     const leaderboard = submissions.map((sub, index) => ({
       rank: index + 1,
-      name: sub.userId?.name || "Unknown",
-      organization: sub.userId?.organization || "Unknown",
+      name: sub.participantName || sub.userId?.name || "Unknown",
+      organization: sub.participantOrganization || sub.userId?.organization || "Unknown",
       totalScore: sub.totalScore,
       totalPassed: sub.totalPassed,
       totalFailed: sub.totalFailed,
@@ -1779,11 +2094,19 @@ export async function getLeaderboardByRoomCodePublic(req, res) {
 export async function getMyRooms(req, res) {
   try {
     const userId = req.userId;
+    const now = new Date();
 
     const rooms = await BattleRoom.find({
       createdBy: userId,
       isActive: true,
       isDeleted: false,
+      $or: [
+        { endDate: { $gt: now } },
+        {
+          endDate: null,
+          endTime: { $gt: now },
+        },
+      ],
     })
       .sort({ createdAt: -1 })
       .limit(20)
@@ -1811,6 +2134,8 @@ export async function getMyRooms(req, res) {
         timeLimitUnit: r.timeLimitUnit,
         questionCount: r.questions?.length || 0,
         participantCount: r.participantCount,
+        startDate: r.startDate || r.startTime,
+        endDate: r.endDate || r.endTime,
         startTime: r.startTime,
         endTime: r.endTime,
         expiresAt: r.expiresAt,
@@ -1826,18 +2151,27 @@ export async function getMyRooms(req, res) {
 export async function getJoinedRooms(req, res) {
   try {
     const userId = req.userId;
+    const now = new Date();
 
     const submissions = await BattleRoomSubmission.find({ userId })
       .populate(
         "roomId",
-        "title roomCode status timeLimit timeLimitUnit startTime endTime",
+        "title roomCode status timeLimit timeLimitUnit startDate endDate startTime endTime",
       )
       .sort({ createdAt: -1 })
       .limit(20)
       .lean();
 
     const rooms = submissions
-      .filter((s) => s.roomId && !s.roomId.isDeleted)
+      .filter((s) => {
+        const roomEndDate = s.roomId?.endDate || s.roomId?.endTime;
+        return (
+          s.roomId &&
+          !s.roomId.isDeleted &&
+          roomEndDate &&
+          new Date(roomEndDate) > now
+        );
+      })
       .map((s) => ({
         id: s.roomId._id,
         roomCode: s.roomId.roomCode,
@@ -1845,6 +2179,8 @@ export async function getJoinedRooms(req, res) {
         status: s.roomId.status,
         timeLimit: s.roomId.timeLimit,
         timeLimitUnit: s.roomId.timeLimitUnit,
+        startDate: s.roomId.startDate || s.roomId.startTime,
+        endDate: s.roomId.endDate || s.roomId.endTime,
         startTime: s.roomId.startTime,
         endTime: s.roomId.endTime,
         totalScore: s.totalScore,
@@ -1963,6 +2299,23 @@ export async function downloadRoomReportPDF(req, res) {
     return res
       .status(status)
       .json({ error: error.message || "Failed to generate room report." });
+  }
+}
+
+/**
+ * GET /api/battle-rooms/:roomCode/report/excel
+ * Creator-only room results workbook.
+ */
+export async function downloadRoomResultsExcel(req, res) {
+  try {
+    await streamRoomResultsExcel(req.params.roomCode, req.userId, res);
+  } catch (error) {
+    const status = error.statusCode || 500;
+    if (status >= 500) console.error("Room results Excel error:", error.message);
+    if (res.headersSent) return res.end();
+    return res
+      .status(status)
+      .json({ error: error.message || "Failed to generate room results." });
   }
 }
 

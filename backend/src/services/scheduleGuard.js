@@ -15,6 +15,13 @@ export const ROOM_WINDOW_STATE = {
   CLOSED: "CLOSED",
 };
 
+export function hasScheduledWindow(room) {
+  return Boolean(
+    room?.isScheduled ||
+      (room?.scheduledDate && room?.scheduledStartTime),
+  );
+}
+
 export function getRoomWindowState(room, now = new Date()) {
   const start = room?.startTime ? new Date(room.startTime) : null;
   const end = room?.endTime ? new Date(room.endTime) : null;
@@ -54,7 +61,7 @@ export function getRoomWindowState(room, now = new Date()) {
       msUntilEnd: end ? endMs - nowMs : 0,
     };
   }
-  if (nowMs > endMs) {
+  if (nowMs >= endMs) {
     return {
       state: ROOM_WINDOW_STATE.ENDED,
       now,
@@ -100,7 +107,7 @@ export function buildBlockedRoomPayload(room, windowState) {
     maxParticipants: room.maxParticipants,
     participantCount: room.participantCount,
     questionCount: room.questions?.length || 0,
-    languages: room.languages,
+    languages: ["java"],
     startTime: room.startTime,
     endTime: room.endTime,
     timezone: room.timezone || "UTC",

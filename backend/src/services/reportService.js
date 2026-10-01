@@ -1,6 +1,8 @@
 import PDFDocument from "pdfkit";
+import ExcelJS from "exceljs";
 import BattleRoom from "../models/BattleRoom.js";
 import BattleRoomSubmission from "../models/BattleRoomSubmission.js";
+import { countRoomTestCases } from "./battleRoomScoring.js";
 
 /**
  * Fetch and verify access to room report data.
@@ -30,8 +32,33 @@ export async function getRoomReportData(roomCode, userId) {
     roomId: room._id,
   })
     .populate("userId", "name email organization")
-    .sort({ totalScore: -1, totalPassed: -1 })
     .lean();
+  submissions.sort((a, b) => {
+    if ((b.totalScore || 0) !== (a.totalScore || 0)) {
+      return (b.totalScore || 0) - (a.totalScore || 0);
+    }
+    if ((b.totalPassed || 0) !== (a.totalPassed || 0)) {
+      return (b.totalPassed || 0) - (a.totalPassed || 0);
+    }
+    if ((a.totalFailed || 0) !== (b.totalFailed || 0)) {
+      return (a.totalFailed || 0) - (b.totalFailed || 0);
+    }
+    const aTime = (a.questionResults || []).reduce(
+      (sum, q) => sum + (q.timeToSolve || 0),
+      0,
+    );
+    const bTime = (b.questionResults || []).reduce(
+      (sum, q) => sum + (q.timeToSolve || 0),
+      0,
+    );
+    const timeDifference = aTime - bTime;
+    if (timeDifference !== 0) return timeDifference;
+    return (a.participantName || a.userId?.name || "").localeCompare(
+      b.participantName || b.userId?.name || "",
+      undefined,
+      { sensitivity: "base" },
+    );
+  });
 
   // Compute Analytics
   const totalParticipants = submissions.length;
@@ -82,6 +109,7 @@ export async function getRoomReportData(roomCode, userId) {
     };
   });
 
+  const totalTestCases = countRoomTestCases(room.questions);
   const participantSummaries = submissions.map((sub, idx) => {
     const totalDurationSeconds = sub.submittedAt && sub.startTime
       ? Math.max(1, Math.floor((new Date(sub.submittedAt) - new Date(sub.startTime)) / 1000))
@@ -98,6 +126,7 @@ export async function getRoomReportData(roomCode, userId) {
       totalPassed: sub.totalPassed || 0,
       totalFailed: sub.totalFailed || 0,
       totalQuestions: sub.totalQuestions || room.questions.length,
+      totalTestCases,
       status: sub.status,
       startTime: sub.startTime,
       submittedAt: sub.submittedAt,
@@ -153,6 +182,59 @@ export async function getRoomReportData(roomCode, userId) {
     },
     participants: participantSummaries,
   };
+}
+
+/**
+ * Build an Excel workbook containing every participant's rank, name,
+ * organization, and score. The caller must enforce creator authorization.
+ */
+export async function buildRoomResultsWorkbook(room, participants) {
+  const workbook = new ExcelJS.Workbook();
+  workbook.creator = room.creator.name;
+  workbook.created = new Date();
+
+  const worksheet = workbook.addWorksheet("Results");
+  worksheet.columns = [
+    { header: "Rank", key: "rank", width: 12 },
+    { header: "Student Name", key: "name", width: 32 },
+    { header: "Organization", key: "organization", width: 32 },
+    { header: "Score", key: "score", width: 16 },
+  ];
+  worksheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
+  worksheet.getRow(1).fill = {
+    type: "pattern",
+    pattern: "solid",
+    fgColor: { argb: "FF1D4ED8" },
+  };
+  worksheet.views = [{ state: "frozen", ySplit: 1 }];
+  worksheet.autoFilter = "A1:D1";
+
+  participants.forEach((participant) => {
+    worksheet.addRow({
+      rank: participant.rank,
+      name: participant.name,
+      organization: participant.organization || "Unspecified",
+      score: participant.totalScore,
+    });
+  });
+
+  return workbook.xlsx.writeBuffer();
+}
+
+/**
+ * Stream a creator-only Excel workbook with participant rank, name,
+ * organization, and score.
+ */
+export async function streamRoomResultsExcel(roomCode, userId, res) {
+  const { room, participants } = await getRoomReportData(roomCode, userId);
+  const buffer = await buildRoomResultsWorkbook(room, participants);
+  const filename = `room-results-${room.roomCode}.xlsx`;
+  res.setHeader(
+    "Content-Type",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  );
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(Buffer.from(buffer));
 }
 
 /**
@@ -327,7 +409,7 @@ export async function streamCompleteRoomPDF(roomCode, userId, res) {
   doc.text("Participant Name", 80, currentY + 6);
   doc.text("Organization", 220, currentY + 6);
   doc.text("Score", 340, currentY + 6);
-  doc.text("Solved", 390, currentY + 6);
+  doc.text("Tests passed", 390, currentY + 6);
   doc.text("Time", 440, currentY + 6);
   doc.text("Status", 490, currentY + 6);
 
@@ -344,7 +426,7 @@ export async function streamCompleteRoomPDF(roomCode, userId, res) {
     doc.text(p.name.substring(0, 24), 80, currentY + 5);
     doc.text(p.organization.substring(0, 20), 220, currentY + 5);
     doc.text(String(p.totalScore), 340, currentY + 5);
-    doc.text(`${p.totalPassed}/${p.totalQuestions}`, 390, currentY + 5);
+    doc.text(`${p.totalPassed}/${p.totalTestCases}`, 390, currentY + 5);
     doc.text(formatSeconds(p.durationSeconds), 440, currentY + 5);
 
     const statusColor = p.status === "COMPLETED" ? successColor : p.status === "DISQUALIFIED" ? dangerColor : secondaryColor;
@@ -394,7 +476,7 @@ export async function streamCompleteRoomPDF(roomCode, userId, res) {
         .fillColor(textColor)
         .fontSize(9)
         .font("Helvetica-Bold")
-        .text(`Question: ${qr.questionTitle} [${qr.status}] — Score: ${qr.score} pts (${qr.passed}/${qr.total} passed, ${qr.executionTime}ms, Lang: ${qr.language})`, 40, currentY);
+        .text(`Question: ${qr.questionTitle} [${qr.status}] — Score: ${qr.score} pts (${qr.passed}/${qr.total} passed, ${qr.executionTime}ms)`, 40, currentY);
 
       currentY += 14;
 
@@ -543,7 +625,7 @@ export async function streamParticipantReportPDF(roomCode, participantId, userId
       .fillColor(textColor)
       .fontSize(8)
       .font("Helvetica")
-      .text(`Status: ${qr.status}  |  Score: ${qr.score} pts  |  Test Cases: ${qr.passed}/${qr.total} passed  |  Time: ${qr.executionTime}ms  |  Language: ${qr.language}`, 40, currentY);
+      .text(`Status: ${qr.status}  |  Score: ${qr.score} pts  |  Test Cases: ${qr.passed}/${qr.total} passed  |  Time: ${qr.executionTime}ms`, 40, currentY);
 
     currentY += 14;
 

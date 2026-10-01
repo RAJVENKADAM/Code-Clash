@@ -3,43 +3,57 @@ import {
   verifyOtp,
   loginWithPassword,
   resendOtp,
+  requestPasswordReset,
+  resetPassword,
 } from "../services/authService.js";
-import { generateLoginToken, createSession } from "../services/tokenService.js";
+import {
+  generateLoginToken,
+  createSession,
+  revokeAllUserSessions,
+} from "../services/tokenService.js";
 
 /**
- * Passwordless OTP Auth Controller.
+ * Password-based authentication controller with email-verified registration.
  *
  * Security notes:
- *  - SANITIZED inputs: email + organization are validated & normalized before use.
- *  - GENERIC RESPONSES: never reveal whether an email exists (anti-enumeration).
+ *  - Registration OTPs verify email only; organization is collected at room join.
+ *  - Registration errors are explicit, while SMTP internals remain private.
  *  - NO LEAKAGE: internal SMTP errors are never surfaced to the client; a clean,
  *    generic message is returned instead. Detailed logs stay server-side.
- *  - 12-HOUR STATELESS JWT: on success, a signed JWT binding userId + email +
- *    verified organization is issued alongside the existing session/refresh flow.
+ *  - Successful registration verification and password login both create a
+ *    signed access token and a refreshable session.
  */
 
 /**
  * POST /request-otp
- * Body: { email, organization }
+ * Body: { email, name, password }
  */
 export async function requestOTP(req, res) {
   try {
-    const { email, organization, name, password } = req.body || {};
+    const { email, name, password } = req.body || {};
     const ip = req.ip || req.connection?.remoteAddress || "";
 
     if (!email) {
       return res.status(400).json({ error: "Email is required." });
     }
 
-    const result = await requestOtp({ email, organization, name, password, ip });
+    const result = await requestOtp({ email, name, password, ip });
 
-    // Generic success — do not reveal whether the account was new or existing.
-    return res.status(200).json({
-      message: "If an account exists, an OTP has been sent.",
+                return res.status(200).json({
+      message: "Registration verification code sent.",
       userId: result.userId,
       email: result.email,
     });
   } catch (error) {
+    if (error.message?.includes("already registered")) {
+      return res.status(409).json({ error: error.message });
+    }
+    if (
+      error.message?.includes("Password") ||
+      error.message?.includes("Full name")
+    ) {
+      return res.status(400).json({ error: error.message });
+    }
     if (error.message && error.message.includes("wait")) {
       return res.status(429).json({ error: error.message });
     }
@@ -57,7 +71,7 @@ export async function requestOTP(req, res) {
 /**
  * POST /login-password
  * Body: { email, password }
- * Super admin password login (complements the OTP flow).
+ * Password login for verified accounts.
  */
 export async function loginWithPasswordHandler(req, res) {
   try {
@@ -88,7 +102,7 @@ export async function loginWithPasswordHandler(req, res) {
       userAgent,
     );
 
-return res.status(200).json({
+    return res.status(200).json({
       message: "Login successful.",
       token: loginToken,
       refreshToken: session.refreshToken,
@@ -110,24 +124,75 @@ return res.status(200).json({
   }
 }
 
+export async function requestPasswordResetHandler(req, res) {
+  try {
+    const { email } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ error: "Email is required." });
+    }
+
+    await requestPasswordReset({ email });
+    return res.status(200).json({
+      message:
+        "If an account exists for that email, a password reset code has been sent.",
+    });
+  } catch (error) {
+    if (error.message === "Invalid email format.") {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error("[AuthController] password reset request failed:", error.message);
+    return res.status(500).json({
+      error: "Unable to process the password reset request. Please try again.",
+    });
+  }
+}
+
+export async function resetPasswordHandler(req, res) {
+  try {
+    const { email, otp, password } = req.body || {};
+    if (!email || !otp || !password) {
+      return res
+        .status(400)
+        .json({ error: "Email, reset code, and new password are required." });
+    }
+
+    const user = await resetPassword({ email, otp, password });
+    await revokeAllUserSessions(user._id);
+    return res.status(200).json({
+      message: "Password updated. Please sign in with your new password.",
+    });
+  } catch (error) {
+    const message = error.message || "";
+    if (
+      message.includes("Invalid") ||
+      message.includes("Password") ||
+      message.includes("Too many") ||
+      message.includes("expired")
+    ) {
+      return res.status(400).json({ error: message });
+    }
+    console.error("[AuthController] password reset failed:", message);
+    return res
+      .status(500)
+      .json({ error: "Unable to reset your password. Please try again." });
+  }
+}
+
 /**
  * POST /verify-otp
- * Body: { userId, organization, otp }
+ * Body: { userId, otp }
  */
 export async function verifyOTP(req, res) {
   try {
-    const { userId, organization, otp } = req.body || {};
+    const { userId, otp } = req.body || {};
 
     if (!userId || !otp) {
       return res.status(400).json({ error: "UserId and OTP are required." });
     }
 
-    // Verify against the exact user + the organization typed at THIS request.
-    // The typed org is cross-checked against the org bound to the OTP record —
-    // if they differ, no matching record exists and verification fails.
-    const user = await verifyOtp({ userId, organization, otp });
+    const user = await verifyOtp({ userId, otp });
 
-    // Issue the stateless 12-hour login JWT binding userId + email + org.
+    // Issue a login token after completing verified registration.
     const loginToken = generateLoginToken(
       user._id.toString(),
       user.email,
@@ -155,6 +220,9 @@ export async function verifyOTP(req, res) {
     });
   } catch (error) {
     const msg = error.message || "";
+    if (msg.includes("already verified")) {
+      return res.status(409).json({ error: msg });
+    }
     if (
       msg.includes("OTP") ||
       msg.includes("attempt") ||
@@ -172,21 +240,24 @@ export async function verifyOTP(req, res) {
 }
 
 /**
- * Backward-compatible resend handler.
- * Accepts either `{ email, organization }` or `{ userId }` (looked up from DB).
+ * Resend a registration-verification code.
+ * Accepts `{ email }` or `{ userId }` (looked up from DB).
  */
 export async function resendOTPHandler(req, res) {
   try {
-    const { email, organization, userId } = req.body || {};
+    const { email, userId } = req.body || {};
     const ip = req.ip || req.connection?.remoteAddress || "";
 
-    const result = await resendOtp({ email, organization, userId, ip });
+    const result = await resendOtp({ email, userId, ip });
     return res.status(200).json({
-      message: "If an account exists, a new OTP has been sent.",
+      message: "If registration can be completed, a new code has been sent.",
       userId: result.userId,
       email: result.email,
     });
   } catch (error) {
+    if (error.message?.includes("already verified")) {
+      return res.status(409).json({ error: error.message });
+    }
     if (error.message && error.message.includes("wait")) {
       return res.status(429).json({ error: error.message });
     }

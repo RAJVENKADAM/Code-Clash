@@ -8,9 +8,8 @@
  *      test cases, or the legacy raw signature + raw input format).
  *   2. Convert parameter-based test-case values into the canonical judge
  *      input string (one JSON line per parameter).
- *   3. Generate starter code for every supported language from one
- *      structured signature
- *   4. Generate judge wrappers for every language
+ *   3. Generate Java starter code from one structured signature
+ *   4. Generate the Java judge wrapper
  *   5. Generate expected outputs via the reference solution
  *   6. Validate a question before publishing (detailed errors)
  *
@@ -29,8 +28,7 @@ import {
   validateParameterTestCases,
   parseInputToParameterValues,
 } from "./parameterConverter.js";
-import { composeStarterFile, AUTHORING_LANGUAGES } from "./languageTemplates.js";
-import { composeProgram } from "./wrapperGenerator.js";
+import { composeStarterFile } from "./languageTemplates.js";
 import { generateExpectedOutputs } from "./referenceSolutionService.js";
 
 export const PROBLEM_TYPES = [
@@ -49,8 +47,6 @@ export const PROBLEM_TYPES = [
   "bit-manipulation",
   "custom",
 ];
-
-export const SUPPORTED_JUDGE_LANGUAGES = AUTHORING_LANGUAGES.map((l) => l.id);
 
 export const CATEGORY_VALUES = [
   "Array", "String", "Matrix", "Linked List", "Binary Tree", "Graph",
@@ -293,7 +289,7 @@ export function normalizeQuestion(rawQuestion) {
   normalized.hiddenTestCases = hiddenTestCases;
 
   normalized.referenceSolution = q.referenceSolution || "";
-  normalized.referenceSolutionLanguage = q.referenceSolutionLanguage || "python";
+  normalized.referenceSolutionLanguage = q.referenceSolutionLanguage || "java";
   normalized.expectedOutputSource = q.expectedOutputSource || "reference";
 
   // Starter code: NEVER persist generated code. Generate fresh on load.
@@ -309,40 +305,15 @@ export function normalizeQuestion(rawQuestion) {
 }
 
 /**
- * Generate starter code for all supported languages from the question's
- * signature. Returns { languageId: starterFile }.
+ * Generate Java starter code from the question's signature.
+ * Returns { java: starterFile }.
  * NEVER saves to DB — always fresh generation.
  */
-export function generateStarterCodeForAllLanguages(question, languages = SUPPORTED_JUDGE_LANGUAGES) {
+export function generateJavaStarterCode(question) {
   if (!question.signature || !question.signature.name) {
     throw new Error("A valid function signature is required before generating starter code.");
   }
-  const selectedLanguages = Array.isArray(languages) && languages.length > 0 ? languages : SUPPORTED_JUDGE_LANGUAGES;
-  const result = {};
-  for (const lang of selectedLanguages) {
-    if (!SUPPORTED_JUDGE_LANGUAGES.includes(lang)) continue;
-    result[lang] = composeStarterFile(question.signature, lang);
-  }
-  return result;
-}
-
-export function generateStarterCodeForLanguages(question, languages = SUPPORTED_JUDGE_LANGUAGES) {
-  return generateStarterCodeForAllLanguages(question, languages);
-}
-
-/**
- * Generate judge wrappers for all supported languages.
- * Returns { languageId: wrapperSnippet }.
- */
-export function generateWrappersForAllLanguages(question) {
-  if (!question.signature || !question.signature.name) {
-    throw new Error("A valid function signature is required before generating wrappers.");
-  }
-  const result = {};
-  for (const lang of SUPPORTED_JUDGE_LANGUAGES) {
-    result[lang] = composeProgram(question, "// participant code inserted here", lang);
-  }
-  return result;
+  return { java: composeStarterFile(question.signature, "java") };
 }
 
 /**
@@ -358,26 +329,28 @@ export async function generateExpectedOutputsForQuestion(question) {
   if (!question.signature || !question.signature.name) {
     throw new Error("A valid function signature is required before generating expected outputs.");
   }
-  const lang = question.referenceSolutionLanguage || "python";
-  if (!SUPPORTED_JUDGE_LANGUAGES.includes(lang)) {
-    throw new Error("Unsupported reference solution language: " + lang);
+  if (
+    question.referenceSolutionLanguage &&
+    question.referenceSolutionLanguage !== "java"
+  ) {
+    throw new Error("Only Java reference solutions are supported.");
   }
-
-  const visible = await generateExpectedOutputs(
+  // Execute visible and hidden cases together so authoring makes one engine
+  // request instead of paying the remote engine's startup latency twice.
+  const visibleCount = question.visibleTestCases.length;
+  const allTestCases = [
+    ...question.visibleTestCases,
+    ...question.hiddenTestCases,
+  ];
+  const generated = await generateExpectedOutputs(
     question,
     question.referenceSolution,
-    lang,
-    question.visibleTestCases
-  );
-  const hidden = await generateExpectedOutputs(
-    question,
-    question.referenceSolution,
-    lang,
-    question.hiddenTestCases
+    "java",
+    allTestCases
   );
 
-  question.visibleTestCases = visible;
-  question.hiddenTestCases = hidden;
+  question.visibleTestCases = generated.slice(0, visibleCount);
+  question.hiddenTestCases = generated.slice(visibleCount);
   question.expectedOutputSource = "reference";
   return question;
 }
@@ -471,8 +444,11 @@ export function validateQuestion(question) {
   if (!question.referenceSolution || !question.referenceSolution.trim()) {
     errors.push("A reference solution is required. The platform generates expected outputs from it.");
   }
-  if (!["java", "python", "cpp", "c"].includes(question.referenceSolutionLanguage || "python")) {
-    errors.push("Reference solution language must be java, python, c++, or c.");
+  if (
+    question.referenceSolutionLanguage &&
+    question.referenceSolutionLanguage !== "java"
+  ) {
+    errors.push("Reference solution must use Java.");
   }
 
   return errors;
@@ -482,17 +458,13 @@ export default {
   PROBLEM_TYPES,
   CATEGORY_VALUES,
   TAG_SUGGESTIONS,
-  SUPPORTED_JUDGE_LANGUAGES,
   splitBulkTestCases,
   deduplicateTestCases,
   resolveQuestionSignature,
   normalizeTestCases,
   normalizeQuestion,
-  generateStarterCodeForAllLanguages,
-  generateWrappersForAllLanguages,
+  generateJavaStarterCode,
   generateExpectedOutputsForQuestion,
   validateQuestion,
-  generateStarterCodeForLanguages,
   parseInputToParameterValues,
 };
-

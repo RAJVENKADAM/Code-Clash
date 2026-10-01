@@ -58,6 +58,7 @@ async function getTransporter() {
     host: EMAIL_HOST,
     port,
     secure,
+    requireTLS: !secure,
     pool: true, // keep connection pool warm → instant sends
     maxConnections: 5,
     maxMessages: 100,
@@ -123,10 +124,14 @@ export function sanitizeEmail(email) {
  * @param {string} params.email - recipient address (already sanitized)
  * @param {string} params.otp - 6-digit code
  * @param {number} params.ttlMinutes - validity window for the message body
- * @param {string} params.organization - org name (for personalization)
  * @returns {Promise<{success: boolean, messageId?: string, previewUrl?: string, devMode?: boolean}>}
  */
-export async function sendOtpEmail({ email, otp, ttlMinutes, organization }) {
+export async function sendOtpEmail({
+  email,
+  otp,
+  ttlMinutes,
+  purpose = "register",
+}) {
   const cleanEmail = sanitizeEmail(email);
   if (!cleanEmail) {
     console.warn("[EmailDispatch] Rejected invalid email address before dispatch.");
@@ -138,7 +143,6 @@ export async function sendOtpEmail({ email, otp, ttlMinutes, organization }) {
     // DEV MODE: fall back to console logging so the flow is testable.
     console.log("==================================================");
     console.log(`[EmailDispatch][DEV] OTP for ${cleanEmail}: ${otp}`);
-    console.log(`[EmailDispatch][DEV] Organization: ${organization}`);
     console.log("==================================================");
     return { success: true, devMode: true };
   }
@@ -154,7 +158,6 @@ const verified = await verifyConnection();
       );
       console.log("==================================================");
       console.log(`[EmailDispatch][DEV] OTP for ${cleanEmail}: ${otp}`);
-      console.log(`[EmailDispatch][DEV] Organization: ${organization}`);
       console.log(
         "[EmailDispatch][DEV] NOTE: Email was NOT delivered. Configure a valid EMAIL_PASS to send real emails."
       );
@@ -170,15 +173,19 @@ const verified = await verifyConnection();
   const fromAddr = isEtherealFallback 
     ? transporter.options.auth.user 
     : (config.EMAIL_USER || "noreply@coding-challenge-platform.com");
+  const isPasswordReset = purpose === "password-reset";
+  const emailPurpose = isPasswordReset ? "password reset" : "account verification";
 
   try {
     const info = await transporter.sendMail({
       from: `"${fromName}" <${fromAddr}>`,
       to: cleanEmail,
-      subject: "Your 6-digit login code",
+      subject: isPasswordReset
+        ? "Reset your CodeClash password"
+        : "Verify your CodeClash account",
       text:
         `Hello from ${fromName}!\n\n` +
-        `Your one-time login code is: ${otp}\n\n` +
+        `Your ${emailPurpose} code is: ${otp}\n\n` +
         `This code expires in ${ttlMinutes} minutes.\n` +
         `If you did not request this code, please ignore this email.\n`,
       html: `
@@ -200,7 +207,7 @@ const verified = await verifyConnection();
           <div class="wrap">
             <div class="card">
               <div class="brand">${fromName}</div>
-              <p style="color:#374151;font-size:15px;">Your one-time login code:</p>
+              <p style="color:#374151;font-size:15px;">Your ${emailPurpose} code:</p>
               <div class="code">${otp}</div>
               <p class="muted">This code expires in ${ttlMinutes} minutes.</p>
               <p class="muted">If you did not request this code, you can safely ignore this email.</p>

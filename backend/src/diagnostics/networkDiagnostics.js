@@ -102,8 +102,8 @@ async function main() {
 
   // 5. execute endpoint - POST with small payload
   const payload = {
-    language: "PYTHON",
-    code: "print(42)",
+    language: "JAVA",
+    code: "public class Main { public static void main(String[] args) { System.out.println(42); } }",
     timeLimit: 2000,
     memoryLimit: 65536,
     testCases: [{ input: "", expectedOutput: "42" }],

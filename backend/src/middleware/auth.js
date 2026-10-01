@@ -7,61 +7,78 @@ const JWT_SECRET = config.JWT_SECRET || "challenge-platform-jwt-secret-change-in
 
 export async function authenticate(req, res, next) {
   try {
-    // Battle rooms are intentionally open: the browser supplies a stable,
-    // non-secret guest id so submissions can still be attributed to a
-    // participant and room ownership can be enforced.
-    const guestId = req.headers["x-guest-id"];
-    if (guestId && /^[a-f0-9-]{16,64}$/i.test(guestId)) {
-      const email = `guest-${guestId.toLowerCase()}@guest.codeclash.local`;
-      let guest = await User.findOne({ email });
-      if (!guest) {
-        guest = await User.create({
-          email,
-          name: req.headers["x-guest-name"] || "Guest participant",
-          role: "USER",
-          isVerified: true,
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+      if (!authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({
+          error: "Invalid authorization header.",
+          code: "INVALID_TOKEN",
         });
       }
-      req.user = guest;
-      req.userId = guest._id;
-      req.tokenPayload = { guest: true, guestId };
+
+      const token = authHeader.slice("Bearer ".length);
+      let decoded;
+      try {
+        decoded = verifyAccessToken(token);
+      } catch (error) {
+        if (error.message === "Access token expired") {
+          return res.status(401).json({
+            error: "Token expired.",
+            code: "TOKEN_EXPIRED",
+          });
+        }
+        return res.status(401).json({
+          error: "Invalid token.",
+          code: "INVALID_TOKEN",
+        });
+      }
+
+      const user = await User.findById(decoded.userId);
+      if (!user) {
+        return res.status(401).json({
+          error: "User not found.",
+          code: "USER_NOT_FOUND",
+        });
+      }
+      if (!user.isVerified) {
+        return res.status(403).json({
+          error: "Account not verified.",
+          code: "NOT_VERIFIED",
+        });
+      }
+
+      req.user = user;
+      req.userId = user._id;
+      req.tokenPayload = decoded;
       return next();
     }
 
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "Access denied. No token provided.", code: "NO_TOKEN" });
-    }
-
-    const token = authHeader.split(" ")[1];
-
-    let decoded;
-    try {
-      decoded = verifyAccessToken(token);
-    } catch (error) {
-      if (error.message === "Access token expired") {
-        return res.status(401).json({ error: "Token expired.", code: "TOKEN_EXPIRED" });
-      }
-      return res.status(401).json({ error: "Invalid token.", code: "INVALID_TOKEN" });
-    }
-
-    const user = await User.findById(decoded.userId);
-if (!user) {
-  return res.status(401).json({ error: "User not found.", code: "USER_NOT_FOUND" });
-}
-
-if (!user.isVerified) {
-  return res.status(403).json({ error: "Account not verified.", code: "NOT_VERIFIED" });
-}
-
-
-    req.user = user;
-    req.userId = user._id;
-    req.tokenPayload = decoded;
-    next();
+    return res.status(401).json({
+      error: "Please sign in to access the platform.",
+      code: "NO_TOKEN",
+    });
   } catch (error) {
     return res.status(500).json({ error: "Authentication failed." });
   }
+}
+
+export function requireVerifiedCreator(req, res, next) {
+  const tokenType = req.tokenPayload?.type;
+  const creatorClaims = req.creatorClaims || req.tokenPayload;
+
+  if (
+    !req.user ||
+    !req.user.isVerified ||
+    !["access", "login"].includes(tokenType) ||
+    (creatorClaims && creatorClaims.userId && creatorClaims.userId !== req.userId?.toString()) ||
+    (creatorClaims && creatorClaims.email && creatorClaims.email !== req.user.email)
+  ) {
+    return res.status(403).json({
+      error: "A verified creator account is required.",
+      code: "VERIFIED_CREATOR_REQUIRED",
+    });
+  }
+  next();
 }
 
 export function optionalAuth(req, res, next) {

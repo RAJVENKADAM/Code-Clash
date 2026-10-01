@@ -32,14 +32,25 @@ const otpSchema = new mongoose.Schema(
       trim: true,
       index: true,
     },
-    // Normalized (trimmed + lowercase) organization. Used to prevent
-    // organization-spoofing during verification.
+    // Legacy field retained for existing OTP documents. Registration OTPs
+    // are bound to the user and email, not to an organization.
     organization: {
       type: String,
-      required: true,
+      default: "",
       lowercase: true,
       trim: true,
+    },
+    purpose: {
+      type: String,
+      enum: ["register", "login", "password-reset", "legacy"],
+      default: "legacy",
       index: true,
+    },
+    name: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 100,
     },
     // Reference to the owning user document (set when the user is created).
     userId: {

@@ -13,7 +13,7 @@
 
 import {
   normalizeQuestion,
-  generateStarterCodeForAllLanguages,
+  generateJavaStarterCode,
   generateExpectedOutputsForQuestion,
   validateQuestion,
 } from "../services/battleRoomAuthoringService.js";
@@ -27,7 +27,7 @@ import { validateSignature } from "../services/signatureParser.js";
  * POST /authoring/generate-signature
  *
  * Body: { name, returnType, parameters: [{name, type}] }
- * Returns the canonical signature + signature previews for all 4 languages.
+ * Returns the canonical signature + Java signature preview.
  */
 export async function generateSignature(req, res) {
   try {
@@ -58,9 +58,9 @@ export async function generateSignature(req, res) {
 export async function generateStarterCode(req, res) {
   try {
     const { functionSignature, signature, starterCodeByLanguage, language } = req.body;
-    const selectedLanguage = typeof language === "string" && language.trim()
-      ? language.trim().toLowerCase()
-      : "java";
+    if (language && String(language).trim().toLowerCase() !== "java") {
+      return res.status(400).json({ error: "Only Java starter code is supported." });
+    }
 
     let question;
     if (signature && signature.name) {
@@ -76,9 +76,9 @@ export async function generateStarterCode(req, res) {
       return res.status(400).json({ error: "A structured signature or function signature is required." });
     }
 
-    const generated = generateStarterCodeForAllLanguages(question, [selectedLanguage]);
+    const generated = generateJavaStarterCode(question);
     const merged = {
-      [selectedLanguage]: generated[selectedLanguage] || (starterCodeByLanguage || {})[selectedLanguage] || "",
+      java: generated.java || (starterCodeByLanguage || {}).java || "",
     };
 
     return res.status(200).json({
@@ -86,7 +86,7 @@ export async function generateStarterCode(req, res) {
       signaturePreview: question.signaturePreview,
       starterCodeByLanguage: merged,
       functionName: question.signature?.name || "",
-      language: selectedLanguage,
+      language: "java",
     });
   } catch (error) {
     console.error("Generate starter code error:", error.message);
@@ -161,4 +161,3 @@ export default {
   generateOutputs,
   validateQuestionEndpoint,
 };
-

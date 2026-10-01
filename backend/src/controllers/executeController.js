@@ -8,6 +8,11 @@ import AuditLog from "../models/AuditLog.js";
 import { composeProgram } from "../services/wrapperGenerator.js";
 import { getStoredSignature } from "../services/signatureParser.js";
 import { executionService } from "../services/executionService.js";
+import { getChallengeTestCaseGroups } from "../services/challengeTestCases.js";
+
+function isJavaLanguage(language) {
+  return !language || String(language).toLowerCase() === "java";
+}
 
 /**
  * Run code (unlimited, does NOT create final submission).
@@ -23,6 +28,10 @@ export async function runCode(req, res) {
       return res
         .status(400)
         .json({ error: "Code and challenge ID are required." });
+    }
+
+    if (!isJavaLanguage(language)) {
+      return res.status(400).json({ error: "Only Java submissions are supported." });
     }
 
     if (code.length > 50000) {
@@ -42,13 +51,11 @@ export async function runCode(req, res) {
         .json({ error: "This challenge is no longer active." });
     }
 
-    const visibleTestCases = (
-      challenge.visibleTestCases ||
-      challenge.testCases ||
-      []
-    )
-      .filter((tc) => !tc.isHidden)
+    const { visible: visibleChallengeCases } =
+      getChallengeTestCaseGroups(challenge);
+    const visibleTestCases = visibleChallengeCases
       .map((tc) => ({
+        ...(tc._id ? { _id: tc._id } : {}),
         input: tc.input,
         expectedOutput: tc.expectedOutput,
         description: tc.description || "",
@@ -56,12 +63,13 @@ export async function runCode(req, res) {
 
     if (visibleTestCases.length === 0) {
       return res.status(200).json({
-        status: "RUN_COMPLETED",
+        status: "SYSTEM_ERROR",
         passed: 0,
         failed: 0,
         total: 0,
         executionTime: 0,
         memoryUsed: 0,
+        error: "No public test cases are available for this challenge.",
         results: [],
         message: "No public test cases available for this challenge.",
       });
@@ -72,7 +80,7 @@ export async function runCode(req, res) {
       code,
       challenge,
       visibleTestCases,
-      language || "java",
+      "java",
       false,
     );
 
@@ -82,21 +90,26 @@ export async function runCode(req, res) {
       resource: "challenge",
       resourceId: challengeId,
       details: {
-        language: language || "java",
+        language: "java",
         testCasesRun: localResult.total,
       },
       requestId: req.requestId,
     }).catch(() => {});
 
-    const visiblePassed = (localResult.results || []).filter(
-      (r) => r.status === "PASSED",
+    const visiblePassedFromCases = (localResult.results || []).filter(
+      (r) => r.status === "PASSED" || r.status === "ACCEPTED",
     ).length;
-    const visibleFailed = (localResult.results || []).filter(
-      (r) => r.status !== "PASSED",
-    ).length;
+    const visiblePassed = localResult.results?.length
+      ? visiblePassedFromCases
+      : Math.min(visibleTestCases.length, localResult.passed);
+    const visibleFailed = localResult.results?.length
+      ? (localResult.results || []).filter(
+      (r) => r.status !== "PASSED" && r.status !== "ACCEPTED",
+        ).length
+      : Math.min(visibleTestCases.length - visiblePassed, localResult.failed);
 
     return res.status(200).json({
-      status: "RUN_COMPLETED",
+      status: localResult.status,
       passed: localResult.passed,
       failed: localResult.failed,
       total: localResult.total,
@@ -107,12 +120,15 @@ export async function runCode(req, res) {
       visiblePassed,
       visibleFailed,
       results: localResult.results.map((r) => ({
+        ...(r.testCaseId ? { testCaseId: r.testCaseId } : {}),
         testCase: r.testCase,
+        input: r.input,
         status: r.status,
         executionTime: r.executionTime,
         memoryUsed: r.memoryUsed,
         output: r.output,
         expectedOutput: r.expectedOutput,
+        error: r.error,
         isHidden: false,
       })),
     });
@@ -139,6 +155,10 @@ export async function submitCode(req, res) {
       return res
         .status(400)
         .json({ error: "Code and challenge ID are required." });
+    }
+
+    if (!isJavaLanguage(language)) {
+      return res.status(400).json({ error: "Only Java submissions are supported." });
     }
 
     if (code.length > 50000) {
@@ -183,14 +203,16 @@ export async function submitCode(req, res) {
       userId,
       challengeId,
       code,
-      language || "java",
+      "java",
       timeToSolve || 0,
     );
 
+    const testCaseGroups = getChallengeTestCaseGroups(challenge);
     const allTestCases = [
-      ...(challenge.visibleTestCases || challenge.testCases || []),
-      ...(challenge.hiddenTestCases || []),
+      ...testCaseGroups.visible,
+      ...testCaseGroups.hidden,
     ].map((tc) => ({
+      ...(tc._id ? { _id: tc._id } : {}),
       input: tc.input,
       expectedOutput: tc.expectedOutput,
       description: tc.description || "",
@@ -200,7 +222,7 @@ export async function submitCode(req, res) {
       code,
       challenge,
       allTestCases,
-      language || "java",
+      "java",
       true,
     );
 
@@ -209,12 +231,8 @@ export async function submitCode(req, res) {
       executionResult,
     );
 
-    const hiddenCount = (challenge.hiddenTestCases || []).length;
-    const publicCount = (
-      challenge.visibleTestCases ||
-      challenge.testCases ||
-      []
-    ).length;
+    const hiddenCount = testCaseGroups.hidden.length;
+    const publicCount = testCaseGroups.visible.length;
 
     AuditLog.create({
       userId,
@@ -223,7 +241,7 @@ export async function submitCode(req, res) {
       resourceId: submission._id,
       details: {
         challengeId,
-        language: language || "java",
+        language: "java",
         passed: executionResult.passed,
         total: executionResult.total,
       },
@@ -235,25 +253,37 @@ export async function submitCode(req, res) {
       isHidden: false,
     }));
     const hiddenResults = result.results.slice(publicCount).map((r) => ({
-      ...r,
+      testCase: r.testCase,
+      status: r.status,
+      executionTime: r.executionTime,
+      memoryUsed: r.memoryUsed,
       isHidden: true,
     }));
 
-    const visiblePassed = visibleResults.filter(
-      (r) => r.status === "PASSED",
-    ).length;
-    const visibleFailed = visibleResults.filter(
-      (r) => r.status !== "PASSED",
-    ).length;
-    const hiddenPassed = hiddenResults.filter(
-      (r) => r.status === "PASSED",
-    ).length;
-    const hiddenFailed = hiddenResults.filter(
-      (r) => r.status !== "PASSED",
-    ).length;
+    const visiblePassed = visibleResults.length
+      ? visibleResults.filter(
+      (r) => r.status === "PASSED" || r.status === "ACCEPTED",
+        ).length
+      : Math.min(publicCount, result.passed);
+    const visibleFailed = visibleResults.length
+      ? visibleResults.filter(
+      (r) => r.status !== "PASSED" && r.status !== "ACCEPTED",
+        ).length
+      : Math.min(publicCount - visiblePassed, result.failed);
+    const hiddenPassed = hiddenResults.length
+      ? hiddenResults.filter(
+      (r) => r.status === "PASSED" || r.status === "ACCEPTED",
+        ).length
+      : Math.min(hiddenCount, Math.max(0, result.passed - visiblePassed));
+    const hiddenFailed = hiddenResults.length
+      ? hiddenResults.filter(
+      (r) => r.status !== "PASSED" && r.status !== "ACCEPTED",
+        ).length
+      : Math.min(hiddenCount, Math.max(0, result.failed - visibleFailed));
 
     return res.status(201).json({
       ...result,
+      output: hiddenCount > 0 ? "" : result.output,
       results: [...visibleResults, ...hiddenResults],
       visiblePassed,
       visibleFailed,
@@ -312,56 +342,51 @@ async function executeAgainstChallenge(
       { timeLimit: 2000, memoryLimit: 65536 },
     );
     const safeResults = (executionResult.results || []).map((r, index) => ({
-      testCase: r.testCase || index + 1,
+      ...(r.testCaseId ? { testCaseId: r.testCaseId } : {}),
+      testCase: r.testCase ?? index + 1,
+      input: r.input ?? testCases[index]?.input ?? "",
       status: r.status,
-      executionTime: r.executionTime || 0,
-      memoryUsed: r.memoryUsed || 0,
-      output: r.output || "",
+      executionTime: r.executionTime ?? 0,
+      memoryUsed: r.memoryUsed ?? 0,
+      output: r.output ?? "",
       expectedOutput: r.expectedOutput ?? "",
+      error: r.error ?? "",
     }));
     return {
       status:
         executionResult.status ||
         (executionResult.accepted ? "ACCEPTED" : "REJECTED"),
-      accepted: executionResult.accepted || false,
-      passed: executionResult.passed || 0,
-      failed: executionResult.failed || 0,
-      total: executionResult.total || testCases.length,
-      output: executionResult.output || "",
-      error: executionResult.error || "",
-      executionTime: executionResult.executionTime || 0,
-      memoryUsed: executionResult.memoryUsed || 0,
+      accepted: executionResult.accepted ?? false,
+      passed: executionResult.passed ?? 0,
+      failed: executionResult.failed ?? 0,
+      total: executionResult.total ?? testCases.length,
+      output: executionResult.output ?? "",
+      error: executionResult.error ?? "",
+      executionTime: executionResult.executionTime ?? 0,
+      memoryUsed: executionResult.memoryUsed ?? 0,
       results: safeResults,
     };
   }
 
   // Fallback: legacy raw signatures.
-  const signatureCandidates =
-    challenge.functionSignatures || challenge.functionSignature
-      ? challenge.functionSignatures || { java: challenge.functionSignature }
-      : {};
-  const firstSignature = Object.entries(signatureCandidates).find(([, value]) =>
-    Boolean(value),
-  );
+  const signature =
+    challenge.functionSignatures?.java || challenge.functionSignature;
 
   let program = code;
   let executionResult;
 
-  if (firstSignature) {
-    const [sigLanguage, signature] = firstSignature;
+  if (signature) {
     const { validateSignature } =
       await import("../services/signatureParser.js");
     const sigResult = validateSignature(signature);
     if (sigResult.valid) {
-      const lang =
-        normalizedLanguage === "javascript" ? sigLanguage : normalizedLanguage;
-      program = composeProgram({ signature: sigResult.parsed }, code, lang, {
+      program = composeProgram({ signature: sigResult.parsed }, code, "java", {
         isFullProgram: true,
       });
       executionResult = await executionService.execute(
         program,
         testCases,
-        lang,
+        "java",
         { timeLimit: 2000, memoryLimit: 65536 },
       );
     } else {
@@ -388,26 +413,28 @@ async function executeAgainstChallenge(
   }
 
   const safeResults = (executionResult.results || []).map((r, index) => ({
-    testCase: r.testCase || index + 1,
+    ...(r.testCaseId ? { testCaseId: r.testCaseId } : {}),
+    testCase: r.testCase ?? index + 1,
+    input: r.input ?? testCases[index]?.input ?? "",
     status: r.status,
-    executionTime: r.executionTime || 0,
-    memoryUsed: r.memoryUsed || 0,
-    output: r.output || "",
+    executionTime: r.executionTime ?? 0,
+    memoryUsed: r.memoryUsed ?? 0,
+    output: r.output ?? "",
     expectedOutput: r.expectedOutput ?? "",
+    error: r.error ?? "",
   }));
-
   return {
     status:
       executionResult.status ||
       (executionResult.accepted ? "ACCEPTED" : "REJECTED"),
-    accepted: executionResult.accepted || false,
-    passed: executionResult.passed || 0,
-    failed: executionResult.failed || 0,
-    total: executionResult.total || testCases.length,
-    output: executionResult.output || "",
-    error: executionResult.error || "",
-    executionTime: executionResult.executionTime || 0,
-    memoryUsed: executionResult.memoryUsed || 0,
+    accepted: executionResult.accepted ?? false,
+    passed: executionResult.passed ?? 0,
+    failed: executionResult.failed ?? 0,
+    total: executionResult.total ?? testCases.length,
+    output: executionResult.output ?? "",
+    error: executionResult.error ?? "",
+    executionTime: executionResult.executionTime ?? 0,
+    memoryUsed: executionResult.memoryUsed ?? 0,
     results: safeResults,
   };
 }

@@ -112,7 +112,8 @@ const questionSchema = new mongoose.Schema(
     },
     referenceSolutionLanguage: {
       type: String,
-      default: "python",
+      default: "java",
+      enum: ["java"],
     },
     wrapperByLanguage: {
       type: Map,
@@ -148,10 +149,10 @@ const battleRoomSchema = new mongoose.Schema(
       required: true,
     },
     questions: [questionSchema],
-    // Allowed languages: ["javascript", "python", "java", "cpp", ...] or ["all"] for allow all
     languages: {
       type: [String],
-      default: ["all"],
+      enum: ["java"],
+      default: ["java"],
     },
     timeLimit: {
       type: Number,
@@ -178,6 +179,23 @@ const battleRoomSchema = new mongoose.Schema(
     endTime: {
       type: Date,
       default: null,
+    },
+    startDate: {
+      type: Date,
+      default: null,
+    },
+    endDate: {
+      type: Date,
+      default: null,
+      index: true,
+    },
+    isScheduled: {
+      type: Boolean,
+      default: false,
+    },
+    participants: {
+      type: [String],
+      default: [],
     },
     timezone: {
       type: String,
@@ -206,6 +224,14 @@ const battleRoomSchema = new mongoose.Schema(
     participantCount: {
       type: Number,
       default: 0,
+    },
+    resultEmailsAttemptedAt: {
+      type: Date,
+      default: null,
+    },
+    resultEmailsCompletedAt: {
+      type: Date,
+      default: null,
     },
     isActive: {
       type: Boolean,
@@ -236,14 +262,23 @@ const battleRoomSchema = new mongoose.Schema(
 battleRoomSchema.index({ roomCode: 1, isActive: 1, isDeleted: 1 });
 battleRoomSchema.index({ status: 1, endTime: 1 });
 battleRoomSchema.index({ startTime: 1, endTime: 1 });
+battleRoomSchema.index({ status: 1, endDate: 1 });
 
 battleRoomSchema.methods.computeCurrentStatus = function () {
   if (this.isDeleted) return "CLOSED";
   if (this.status === "CLOSED") return "CLOSED";
   const now = new Date();
-  if (this.startTime && now < this.startTime) return "UPCOMING";
-  if (this.endTime && now > this.endTime) return "CLOSED";
-  if (this.startTime && now >= this.startTime && (!this.endTime || now <= this.endTime)) return "ACTIVE";
+  const start = this.startDate || this.startTime;
+  const end = this.endDate || this.endTime;
+  if (start && now < start) return "UPCOMING";
+  if (end && now >= end) return "CLOSED";
+  if (
+    start &&
+    now >= start &&
+    (!end || now < end)
+  ) {
+    return "ACTIVE";
+  }
   return this.status || "UPCOMING";
 };
 
@@ -272,12 +307,6 @@ function publicQuestionJSON(q) {
     signature: q.signature,
     starterCode: q.starterCode,
     starterCodeByLanguage: q.starterCodeByLanguage || {},
-    visibleTestCases: (q.visibleTestCases || []).map((tc) => ({
-      input: tc.input,
-      expectedOutput: tc.expectedOutput,
-      description: tc.description || "",
-      // parameterValues intentionally NOT exposed to participants.
-    })),
     hiddenTestCases: undefined,
     points: q.points,
   };
@@ -312,7 +341,7 @@ function creatorQuestionJSON(q) {
     functionName: q.functionName || "",
     expectedOutputSource: q.expectedOutputSource || "reference",
     referenceSolution: q.referenceSolution || "",
-    referenceSolutionLanguage: q.referenceSolutionLanguage || "python",
+    referenceSolutionLanguage: "java",
   };
 }
 
@@ -359,13 +388,15 @@ battleRoomSchema.methods.toEditJSON = function () {
       functionName: q.functionName || "",
       expectedOutputSource: q.expectedOutputSource || "reference",
       referenceSolution: q.referenceSolution || "",
-      referenceSolutionLanguage: q.referenceSolutionLanguage || "python",
+      referenceSolutionLanguage: "java",
       wrapperByLanguage: q.wrapperByLanguage || {},
     })),
-    languages: this.languages,
+    languages: ["java"],
     timeLimit: this.timeLimit,
     timeLimitUnit: this.timeLimitUnit,
     status: this.status,
+    startDate: this.startDate || this.startTime,
+    endDate: this.endDate || this.endTime,
     startTime: this.startTime,
     endTime: this.endTime,
     participantCount: this.participantCount,
@@ -384,10 +415,12 @@ battleRoomSchema.methods.toPublicJSON = function () {
     description: this.description,
     createdBy: this.createdBy,
     questions: this.questions.map(publicQuestionJSON),
-    languages: this.languages,
+    languages: ["java"],
     timeLimit: this.timeLimit,
     timeLimitUnit: this.timeLimitUnit,
     status: currentStatus,
+    startDate: this.startDate || this.startTime,
+    endDate: this.endDate || this.endTime,
     startTime: this.startTime,
     endTime: this.endTime,
     timezone: this.timezone || "UTC",
@@ -417,12 +450,14 @@ battleRoomSchema.methods.toLeaderboardJSON = function () {
     timeLimit: this.timeLimit,
     timeLimitUnit: this.timeLimitUnit,
     status: currentStatus,
+    startDate: this.startDate || this.startTime,
+    endDate: this.endDate || this.endTime,
     startTime: this.startTime,
     endTime: this.endTime,
     timezone: this.timezone || "UTC",
     participantCount: this.participantCount,
     questionCount: this.questions.length,
-    languages: this.languages,
+    languages: ["java"],
   };
 };
 

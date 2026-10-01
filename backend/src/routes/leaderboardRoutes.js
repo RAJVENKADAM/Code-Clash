@@ -6,12 +6,11 @@ import {
   getUserRankToday,
   getUserSubmissionStatus,
 } from "../controllers/leaderboardController.js";
-import { authenticate, optionalAuth } from "../middleware/auth.js";
+import { authenticate } from "../middleware/auth.js";
 
 const router = Router();
 
-// Global leaderboard is public (based on today's challenge only).
-router.get("/global", optionalAuth, getGlobalLeaderboard);
+router.get("/global", authenticate, getGlobalLeaderboard);
 router.get("/user/rank", authenticate, getUserRank);
 router.get("/user/rank-today", authenticate, getUserRankToday);
 router.get("/challenge/:challengeId", authenticate, getChallengeLeaderboard);

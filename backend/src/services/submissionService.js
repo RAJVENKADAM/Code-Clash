@@ -32,28 +32,46 @@ function parseExecutionResult(result) {
     const parsed = typeof result === "string" ? JSON.parse(result) : result;
 
     const results = (parsed.results || []).map((r, idx) => ({
-      testCase: r.testCase || idx + 1,
+      ...(r.testCaseId ? { testCaseId: String(r.testCaseId) } : {}),
+      testCase: r.testCase ?? idx + 1,
       status: r.status || "ERROR",
-      executionTime: r.executionTime || 0,
-      memoryUsed: r.memoryUsed || 0,
-      output: r.output || "",
-      expectedOutput: r.expectedOutput || "",
+      input: r.input ?? "",
+      executionTime: r.executionTime ?? 0,
+      memoryUsed: r.memoryUsed ?? 0,
+      output: r.output ?? "",
+      expectedOutput: r.expectedOutput ?? "",
+      error: r.error ?? "",
     }));
 
-    const passed = results.filter((r) => r.status === "PASSED").length;
-    const failed = results.filter((r) => r.status === "FAILED" || r.status === "ERROR").length;
-    const total = parsed.total || results.length;
+    const passed = results.filter((r) => ["PASSED", "ACCEPTED"].includes(r.status)).length;
+    const total = Number(parsed.total) || results.length;
+    const caseFailures = results.length
+      ? results.length - passed
+      : Number(parsed.failed) || 0;
+    const failed = ["PENDING", "PROCESSING"].includes(parsed.status)
+      ? caseFailures
+      : Math.max(caseFailures, Math.max(0, total - passed));
+    const accepted =
+      parsed.status === "ACCEPTED" &&
+      total > 0 &&
+      passed === total &&
+      failed === 0;
+    const status = accepted
+      ? "ACCEPTED"
+      : parsed.status && parsed.status !== "ACCEPTED"
+        ? parsed.status
+        : "WRONG_ANSWER";
 
     return {
-      status: parsed.status || (passed === total && total > 0 ? "ACCEPTED" : "REJECTED"),
-      accepted: parsed.accepted || (passed === total && total > 0),
+      status,
+      accepted,
       passed,
       failed,
       total,
-      output: parsed.output || "",
-      error: parsed.error || "",
-      executionTime: parsed.executionTime || results.reduce((sum, r) => sum + r.executionTime, 0),
-      memoryUsed: parsed.memoryUsed || results.reduce((sum, r) => sum + r.memoryUsed, 0),
+      output: parsed.output ?? "",
+      error: parsed.error ?? "",
+      executionTime: parsed.executionTime ?? results.reduce((sum, r) => sum + r.executionTime, 0),
+      memoryUsed: parsed.memoryUsed ?? results.reduce((sum, r) => sum + r.memoryUsed, 0),
       results,
     };
   } catch (e) {
@@ -76,7 +94,7 @@ export async function createSubmission(userId, challengeId, code, language, time
     userId,
     challengeId,
     code,
-    language: language || "javascript",
+    language: language || "java",
     status: "PENDING",
     timeToSolve: timeToSolve || 0,
     total: challenge.testCases.length,
@@ -117,7 +135,7 @@ export async function processSubmissionResult(submissionId, executionResult) {
   await updateUserStats(submission.userId, parsed.accepted, submission.score);
   await updateChallengeStats(submission.challengeId, parsed.accepted);
 
-  return submission.toPublicJSON();
+  return submission.toPublicJSON({ includeTestCaseDetails: true });
 }
 
 export async function disqualifySubmission(submissionId) {
@@ -160,4 +178,3 @@ async function updateChallengeStats(challengeId, accepted) {
     },
   });
 }
-

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import config from "../config/env.js";
@@ -46,6 +47,25 @@ export const reportLimiter = rateLimit({
     error: "Too many report requests. Please wait a moment and retry.",
   },
 });
+
+export function requireJudgeCallbackSecret(req, res, next) {
+  const configuredSecret = config.JUDGE_CALLBACK_SECRET;
+  if (!configuredSecret) {
+    return res.status(503).json({
+      error: "Judge callback authentication is not configured.",
+    });
+  }
+
+  const suppliedSecret = req.headers["x-judge-callback-key"];
+  if (
+    typeof suppliedSecret !== "string" ||
+    Buffer.byteLength(suppliedSecret) !== Buffer.byteLength(configuredSecret) ||
+    !timingSafeEqual(Buffer.from(suppliedSecret), Buffer.from(configuredSecret))
+  ) {
+    return res.status(401).json({ error: "Invalid judge callback credentials." });
+  }
+  next();
+}
 
 export function securityMiddleware(app) {
   // Helmet with strict CSP
@@ -132,8 +152,9 @@ export function securityMiddleware(app) {
   // CORS hardening
   const allowedOrigins = [
     config.CLIENT_URL,
-    "http://localhost:5173",
-    "http://localhost:3000",
+    ...(config.NODE_ENV === "production"
+      ? []
+      : ["http://localhost:5173", "http://localhost:3000"]),
   ].filter(Boolean);
 
   app.use((req, res, next) => {
@@ -150,7 +171,7 @@ export function securityMiddleware(app) {
     );
     res.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type, Authorization, X-Guest-ID, X-Request-Id, X-CSRF-Token",
+      "Content-Type, Authorization, X-Guest-ID, X-Creator-Credential, X-Judge-Callback-Key, X-Request-Id, X-CSRF-Token",
     );
     res.setHeader("Access-Control-Expose-Headers", "X-Request-Id");
 

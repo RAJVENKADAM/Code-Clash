@@ -2,15 +2,21 @@ import mongoose from "mongoose";
 
 const testResultSchema = new mongoose.Schema(
   {
+    testCaseId: String,
     testCase: {
       type: Number,
       required: true,
     },
     status: {
       type: String,
-      enum: ["PASSED", "FAILED", "ERROR", "PENDING"],
+      enum: [
+        "PASSED", "ACCEPTED", "FAILED", "ERROR", "PENDING", "PROCESSING",
+        "WRONG_ANSWER", "COMPILATION_ERROR", "RUNTIME_ERROR",
+        "TIME_LIMIT_EXCEEDED", "MEMORY_LIMIT_EXCEEDED", "SYSTEM_ERROR",
+      ],
       default: "PENDING",
     },
+    input: { type: String, default: "" },
     executionTime: {
       type: Number,
       default: 0,
@@ -24,6 +30,10 @@ const testResultSchema = new mongoose.Schema(
       default: "",
     },
     expectedOutput: {
+      type: String,
+      default: "",
+    },
+    error: {
       type: String,
       default: "",
     },
@@ -51,12 +61,17 @@ const submissionSchema = new mongoose.Schema(
     },
     language: {
       type: String,
-      default: "javascript",
-      enum: ["javascript", "python", "java", "cpp"],
+      default: "java",
+      enum: ["java"],
     },
     status: {
       type: String,
-      enum: ["PENDING", "PROCESSING", "ACCEPTED", "REJECTED", "ERROR", "DISQUALIFIED"],
+      enum: [
+        "PENDING", "PROCESSING", "ACCEPTED", "WRONG_ANSWER",
+        "COMPILATION_ERROR", "RUNTIME_ERROR", "TIME_LIMIT_EXCEEDED",
+        "MEMORY_LIMIT_EXCEEDED", "SYSTEM_ERROR", "REJECTED", "ERROR",
+        "DISQUALIFIED",
+      ],
       default: "PENDING",
       index: true,
     },
@@ -116,7 +131,7 @@ submissionSchema.index({ userId: 1, createdAt: -1 });
 submissionSchema.index({ challengeId: 1, status: 1 });
 submissionSchema.index({ score: -1 });
 
-submissionSchema.methods.toPublicJSON = function () {
+submissionSchema.methods.toPublicJSON = function ({ includeTestCaseDetails = false } = {}) {
   return {
     submissionId: this._id,
     submittedAt: this.createdAt,
@@ -130,6 +145,15 @@ submissionSchema.methods.toPublicJSON = function () {
     executionTime: this.executionTime,
     memoryUsed: this.memoryUsed,
     results: this.results.map((r) => ({
+      ...(includeTestCaseDetails
+        ? {
+            testCaseId: r.testCaseId,
+            input: r.input,
+            output: r.output,
+            expectedOutput: r.expectedOutput,
+            error: r.error,
+          }
+        : {}),
       testCase: r.testCase,
       status: r.status,
       executionTime: r.executionTime,
@@ -139,4 +163,3 @@ submissionSchema.methods.toPublicJSON = function () {
 };
 
 export default mongoose.model("Submission", submissionSchema);
-

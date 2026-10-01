@@ -1,7 +1,20 @@
+import { compareOutput } from "./outputComparator.js";
+
 const DEFAULT_ENGINE_URL =
   "https://secure-code-engine.onrender.com/api/v1/execute";
 const DEFAULT_TIMEOUT_MS = 120000;
-const SUPPORTED_EXECUTION_LANGUAGES = ["c", "cpp", "java", "python"];
+const SUPPORTED_EXECUTION_LANGUAGES = ["java"];
+const WARM_UP_COOLDOWN_MS = 5 * 60 * 1000;
+const MAX_CONCURRENT_TEST_CASES = 3;
+const FATAL_TEST_CASE_STATUSES = [
+  "COMPILATION_ERROR",
+  "RUNTIME_ERROR",
+  "TIME_LIMIT_EXCEEDED",
+  "MEMORY_LIMIT_EXCEEDED",
+  "SYSTEM_ERROR",
+];
+let lastWarmUpAt = 0;
+let warmUpPromise = null;
 
 function normalizeLanguage(language) {
   const lang = String(language || "")
@@ -10,130 +23,257 @@ function normalizeLanguage(language) {
   if (SUPPORTED_EXECUTION_LANGUAGES.includes(lang)) {
     return lang;
   }
-  return "java";
+  throw new Error(`Unsupported execution language: ${language || "(empty)"}. Only Java is supported.`);
 }
 
 /**
- * Normalize the Secure Code Engine response into a consistent shape.
- *
- * Engine contract (from examples):
- *   {
- *     "submissionId": "...",
- *     "status": "ACCEPTED" | "SYSTEM_ERROR" | "WRONG_ANSWER",
- *     "accepted": true/false,
- *     "passed": 1, "failed": 0, "total": 1,
- *     "output": "300",
- *     "executionTime": 602,
- *     "memoryUsed": 0,
- *     "error": "Internal execution error: ...",
- *     "results": [
- *       {
- *         "testCase": 1,
- *         "status": "PASSED" | "FAILED" | "SYSTEM_ERROR",
- *         "expectedOutput": "30",
- *         "actualOutput": "300",
- *         "executionTime": 602,
- *         "memoryUsed": 0
- *       }
- *     ]
- *   }
+ * Normalize the Secure Code Engine's top-level output or per-test result
+ * format. Top-level output is case-specific only because execute() sends one
+ * test case per request.
  */
-function normalizeEngineResponse(raw) {
-  if (!raw) {
-    return {
-      status: "SYSTEM_ERROR",
-      accepted: false,
-      passed: 0,
-      failed: 0,
-      total: 0,
-      output: "",
-      error: "No response from execution engine.",
-      executionTime: 0,
-      memoryUsed: 0,
-      results: [],
-    };
+function normalizeStatus(value, error = "") {
+  const status = String(value || "").trim().toUpperCase().replaceAll(" ", "_");
+  if (!status) return "";
+  const errorText = String(error || "").toLowerCase();
+  if (["PASS", "SUCCESS", "OK"].includes(status)) return "PASSED";
+  if (["FAIL", "FAILED", "REJECTED"].includes(status)) return "WRONG_ANSWER";
+  if (["COMPILE_ERROR", "COMPILATION_ERROR"].includes(status)) {
+    return "COMPILATION_ERROR";
   }
-
-  const r = typeof raw === "string" ? JSON.parse(raw) : raw;
-
-  const results = (r.results || []).map((tc, idx) => {
-    let rawStatus = (tc.status || "ERROR").toUpperCase();
-    if (rawStatus === "COMPILE_ERROR") rawStatus = "COMPILATION_ERROR";
-    return {
-      testCase: tc.testCase || idx + 1,
-      status: rawStatus,
-      executionTime: tc.executionTime || 0,
-      memoryUsed: tc.memoryUsed || 0,
-      output: tc.actualOutput !== undefined ? tc.actualOutput : tc.output || "",
-      expectedOutput: tc.expectedOutput !== undefined ? tc.expectedOutput : "",
-      error: tc.error || "",
-    };
-  });
-
-  const passed = results.filter(
-    (tc) => tc.status === "PASSED" || tc.status === "ACCEPTED",
-  ).length;
-  const failed = results.filter(
-    (tc) => tc.status !== "PASSED" && tc.status !== "ACCEPTED",
-  ).length;
-  const total = r.total || results.length;
-
-  let status = (r.status || "").toUpperCase();
-  if (status === "COMPILE_ERROR") status = "COMPILATION_ERROR";
-
-  if (!status || status === "ERROR") {
-    if (r.accepted || (passed === total && total > 0)) {
-      status = "ACCEPTED";
-    } else if (results.some((tc) => tc.status === "TIME_LIMIT_EXCEEDED")) {
-      status = "TIME_LIMIT_EXCEEDED";
-    } else if (results.some((tc) => tc.status === "MEMORY_LIMIT_EXCEEDED")) {
-      status = "MEMORY_LIMIT_EXCEEDED";
-    } else if (results.some((tc) => tc.status === "COMPILATION_ERROR")) {
-      status = "COMPILATION_ERROR";
-    } else if (results.some((tc) => tc.status === "RUNTIME_ERROR")) {
-      status = "RUNTIME_ERROR";
-    } else if (failed > 0) {
-      status = "WRONG_ANSWER";
-    } else if (r.error) {
-      const errLower = String(r.error).toLowerCase();
-      if (
-        errLower.includes("compile") ||
-        errLower.includes("compilation") ||
-        errLower.includes("syntax")
-      ) {
-        status = "COMPILATION_ERROR";
-      } else if (
-        errLower.includes("timeout") ||
-        errLower.includes("timed out")
-      ) {
-        status = "TIME_LIMIT_EXCEEDED";
-      } else {
-        status = "SYSTEM_ERROR";
-      }
-    } else {
-      status = "WRONG_ANSWER";
+  if (["RUNTIME_ERROR", "RUNTIME_EXCEPTION", "RE"].includes(status)) {
+    return "RUNTIME_ERROR";
+  }
+  if (["TLE", "TIMEOUT", "TIMED_OUT"].includes(status)) {
+    return "TIME_LIMIT_EXCEEDED";
+  }
+  if (["MLE", "MEMORY_ERROR"].includes(status)) {
+    return "MEMORY_LIMIT_EXCEEDED";
+  }
+  if (status === "ERROR") {
+    if (errorText.includes("compile") || errorText.includes("syntax")) {
+      return "COMPILATION_ERROR";
     }
+    if (errorText.includes("timeout") || errorText.includes("timed out")) {
+      return "TIME_LIMIT_EXCEEDED";
+    }
+    if (/exception|runtime|stack trace|at [\w.$]+\(/i.test(errorText)) {
+      return "RUNTIME_ERROR";
+    }
+    return "SYSTEM_ERROR";
   }
+  return [
+    "PASSED",
+    "ACCEPTED",
+    "WRONG_ANSWER",
+    "COMPILATION_ERROR",
+    "RUNTIME_ERROR",
+    "TIME_LIMIT_EXCEEDED",
+    "MEMORY_LIMIT_EXCEEDED",
+    "SYSTEM_ERROR",
+    "PENDING",
+    "PROCESSING",
+  ].includes(status)
+    ? status
+    : "SYSTEM_ERROR";
+}
 
-  const isAccepted =
-    status === "ACCEPTED" ||
-    (passed === total &&
-      total > 0 &&
-      !status.includes("ERROR") &&
-      status !== "WRONG_ANSWER");
+function outputString(value) {
+  if (typeof value === "string") return value;
+  if (value === null) return "null";
+  if (value === undefined) return "";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function outputsMatch(actual, expected) {
+  return compareOutput(actual, expected).passed;
+}
+
+function failedCase(testCase, index, error, status = "SYSTEM_ERROR") {
+  return {
+    ...(testCase?._id || testCase?.id
+      ? { testCaseId: String(testCase._id || testCase.id) }
+      : {}),
+    testCase: index + 1,
+    input: outputString(testCase?.input),
+    status,
+    executionTime: 0,
+    memoryUsed: 0,
+    output: "",
+    expectedOutput: outputString(testCase?.expectedOutput),
+    error: outputString(error),
+  };
+}
+
+function summarizeResults(results, total, error = "") {
+  const passed = results.filter((tc) =>
+    ["PASSED", "ACCEPTED"].includes(tc.status),
+  ).length;
+  const failed = Math.max(0, total - passed);
+  const fatalStatus = [
+    "SYSTEM_ERROR",
+    "COMPILATION_ERROR",
+    "RUNTIME_ERROR",
+    "TIME_LIMIT_EXCEEDED",
+    "MEMORY_LIMIT_EXCEEDED",
+  ].find((status) => results.some((tc) => tc.status === status));
+  const hasPending = results.some((tc) =>
+    ["PENDING", "PROCESSING"].includes(tc.status),
+  );
+  const status =
+    total === 0
+      ? "SYSTEM_ERROR"
+      : fatalStatus ||
+        (hasPending
+          ? results.find((tc) =>
+              ["PENDING", "PROCESSING"].includes(tc.status),
+            ).status
+          : passed === total
+            ? "ACCEPTED"
+            : "WRONG_ANSWER");
+  const caseErrors = results
+    .filter((tc) => tc.error)
+    .map((tc) => `Test case ${tc.testCase}: ${tc.error}`);
 
   return {
     status,
-    accepted: isAccepted,
+    accepted: status === "ACCEPTED" && total > 0 && passed === total,
     passed,
     failed,
     total,
-    output: r.output || "",
-    error: r.error || "",
-    executionTime: r.executionTime || 0,
-    memoryUsed: r.memoryUsed || 0,
+    output: results.map((tc) => tc.output).join("\n"),
+    error: error || caseErrors.join("\n"),
+    executionTime: results.reduce(
+      (sum, tc) => sum + (Number(tc.executionTime) || 0),
+      0,
+    ),
+    memoryUsed: results.reduce(
+      (peak, tc) => Math.max(peak, Number(tc.memoryUsed) || 0),
+      0,
+    ),
     results,
   };
+}
+
+export function normalizeEngineResponse(raw, submittedTestCases = []) {
+  let response;
+  let responseError = "";
+  try {
+    response = typeof raw === "string" ? JSON.parse(raw) : raw;
+    if (!response || typeof response !== "object" || Array.isArray(response)) {
+      responseError = raw
+        ? "Execution engine returned an invalid response."
+        : "No response from execution engine.";
+    }
+  } catch {
+    responseError = "Execution engine returned malformed JSON.";
+  }
+
+  const cases = Array.isArray(submittedTestCases) ? submittedTestCases : [];
+  if (cases.length === 0) {
+    return summarizeResults([], 0, responseError || "No test cases were provided.");
+  }
+  if (responseError) {
+    return summarizeResults(
+      cases.map((testCase, index) =>
+        failedCase(testCase, index, responseError),
+      ),
+      cases.length,
+      responseError,
+    );
+  }
+
+  const globalError = response.error ?? response.message ?? "";
+  const globalStatus = normalizeStatus(response.status, globalError);
+  const topLevelFatalStatus = FATAL_TEST_CASE_STATUSES.includes(globalStatus)
+    ? globalStatus
+    : "";
+  const engineResults = Array.isArray(response.results) ? response.results : null;
+  const malformedResults =
+    Object.hasOwn(response, "results") && !Array.isArray(response.results);
+  const resultCountMismatch =
+    !topLevelFatalStatus &&
+    (malformedResults ||
+      (engineResults !== null && engineResults.length !== cases.length));
+
+  const results = cases.map((testCase, index) => {
+    const engineResult = engineResults?.[index];
+    const engineCase =
+      engineResult && typeof engineResult === "object" && !Array.isArray(engineResult)
+        ? engineResult
+        : null;
+    const caseError = engineCase?.error ?? globalError;
+    const caseStatus = normalizeStatus(engineCase?.status, caseError);
+    const fatalStatus =
+      FATAL_TEST_CASE_STATUSES.includes(caseStatus)
+        ? caseStatus
+        : topLevelFatalStatus;
+    let outputValue;
+    if (engineCase) {
+      outputValue = engineCase.actualOutput !== undefined
+        ? engineCase.actualOutput
+        : engineCase.output !== undefined
+          ? engineCase.output
+          : engineCase.stdout;
+    }
+    if (
+      outputValue === undefined &&
+      cases.length === 1 &&
+      !resultCountMismatch
+    ) {
+      outputValue = response.output;
+    }
+    const expectedValue = testCase?.expectedOutput;
+    let status;
+
+    if (fatalStatus) {
+      status = fatalStatus;
+    } else if (
+      outputValue !== undefined &&
+      expectedValue !== undefined &&
+      !resultCountMismatch
+    ) {
+      status = outputsMatch(
+        outputString(outputValue),
+        outputString(expectedValue),
+      )
+        ? "PASSED"
+        : "WRONG_ANSWER";
+    } else if (["PENDING", "PROCESSING"].includes(caseStatus)) {
+      status = caseStatus;
+    } else {
+      status = "SYSTEM_ERROR";
+    }
+
+    return {
+      ...(testCase?._id || testCase?.id
+        ? { testCaseId: String(testCase._id || testCase.id) }
+        : {}),
+      testCase: engineCase?.testCase ?? index + 1,
+      input: outputString(testCase?.input),
+      status,
+      executionTime: engineCase?.executionTime ?? response.executionTime ?? 0,
+      memoryUsed: engineCase?.memoryUsed ?? response.memoryUsed ?? 0,
+      output: outputValue === undefined ? "" : outputString(outputValue),
+      expectedOutput: outputString(expectedValue),
+      error: caseError ? outputString(caseError) : "",
+    };
+  });
+
+  const error = responseError ||
+    (malformedResults
+      ? "Execution engine returned malformed test results."
+      : resultCountMismatch
+        ? `Execution engine returned ${engineResults.length} result(s) for ${cases.length} test case(s).`
+      : globalError);
+  if (resultCountMismatch) {
+    results.forEach((result) => {
+      result.status = "SYSTEM_ERROR";
+      result.error = error;
+      result.output = "";
+    });
+  }
+  return summarizeResults(results, cases.length, error);
 }
 
 export class ExecutionService {
@@ -151,35 +291,62 @@ export class ExecutionService {
     this.apiKey = apiKey;
   }
 
-  async execute(code, testCases, language, options = {}) {
-    const payload = {
-      language: normalizeLanguage(language),
-      code: code || "",
-      timeLimit: Number(options.timeLimit || 2000),
-      memoryLimit: Number(options.memoryLimit || 65536),
-      testCases: Array.isArray(testCases)
-        ? testCases.map((testCase) => ({
-            input: String(testCase?.input ?? ""),
-            expectedOutput: String(testCase?.expectedOutput ?? ""),
-          }))
-        : [],
-    };
+  async execute(code, testCases, language = "java", options = {}) {
+    const normalizedLanguage = normalizeLanguage(language).toUpperCase();
+    const cases = Array.isArray(testCases) ? testCases : [];
+    if (cases.length === 0) {
+      return summarizeResults([], 0, "No test cases were provided.");
+    }
 
     // Log execution details only in development mode, redacted for security
     if (process.env.NODE_ENV === "development") {
       console.log("[ExecutionService] Request:", {
         url: this.engineUrl,
-        language: payload.language,
-        codeLength: payload.code.length,
-        timeLimit: payload.timeLimit,
-        memoryLimit: payload.memoryLimit,
-        testCaseCount: payload.testCases.length,
+        language: normalizedLanguage,
+        codeLength: (code || "").length,
+        timeLimit: Number(options.timeLimit || 2000),
+        memoryLimit: Number(options.memoryLimit || 65536),
+        testCaseCount: cases.length,
       });
     }
 
+    const results = new Array(cases.length);
+    let nextIndex = 0;
+    const runNextCase = async () => {
+      while (nextIndex < cases.length) {
+        const index = nextIndex++;
+        const testCase = cases[index];
+        const payload = {
+          language: normalizedLanguage,
+          code: code || "",
+          timeLimit: Number(options.timeLimit || 2000),
+          memoryLimit: Number(options.memoryLimit || 65536),
+          testCases: [
+            {
+              input: outputString(testCase?.input),
+              expectedOutput: outputString(testCase?.expectedOutput),
+            },
+          ],
+        };
+        results[index] = await this.executeSingleCase(
+          payload,
+          testCase,
+          index,
+        );
+      }
+    };
+    await Promise.all(
+      Array.from(
+        { length: Math.min(MAX_CONCURRENT_TEST_CASES, cases.length) },
+        runNextCase,
+      ),
+    );
+    return summarizeResults(results, cases.length);
+  }
+
+  async executeSingleCase(payload, testCase, index) {
     const controller =
       typeof AbortController !== "undefined" ? new AbortController() : null;
-
     const timeoutId = controller
       ? setTimeout(() => controller.abort(), this.timeoutMs)
       : null;
@@ -194,69 +361,101 @@ export class ExecutionService {
         body: JSON.stringify(payload),
         signal: controller?.signal,
       });
-
       let body;
-
       if (typeof response.text === "function") {
-        const responseText = await response.text();
-        try {
-          body = JSON.parse(responseText);
-        } catch {
-          body = { error: responseText };
-        }
+        body = await response.text();
       } else if (typeof response.json === "function") {
         body = await response.json();
       } else {
-        body = {
-          error: "Unrecognized response interface from execution engine.",
-        };
+        return failedCase(
+          testCase,
+          index,
+          "Unrecognized response interface from execution engine.",
+        );
       }
 
       if (!response.ok) {
-        const engineError = body?.error || body?.message || body?.details || "";
-        const errorMessage = engineError
+        let engineError = "";
+        try {
+          const parsed = typeof body === "string" ? JSON.parse(body) : body;
+          engineError = parsed?.error || parsed?.message || parsed?.details || "";
+        } catch {
+          engineError = "";
+        }
+        const message = engineError
           ? `Secure Code Engine error: ${engineError}`
           : `Secure Code Engine returned HTTP ${response.status}`;
-
-        // Log only error info, never expose full response/code
-        if (process.env.NODE_ENV === "development") {
-          console.error("[ExecutionService] Engine error:", {
-            status: response.status,
-            error: engineError,
-          });
-        }
-
-        return {
-          status: "SYSTEM_ERROR",
-          accepted: false,
-          passed: 0,
-          failed: 0,
-          total: 0,
-          output: "",
-          error: errorMessage,
-          executionTime: 0,
-          memoryUsed: 0,
-          results: [],
-        };
+        return failedCase(testCase, index, message);
       }
 
-      return normalizeEngineResponse(body);
+      const normalized = normalizeEngineResponse(body, [testCase]);
+      if (normalized.results.length !== 1) {
+        return failedCase(
+          testCase,
+          index,
+          "Execution engine did not return exactly one test result.",
+        );
+      }
+      return { ...normalized.results[0], testCase: index + 1 };
     } catch (error) {
-      // Log error safely, never expose sensitive data
       if (process.env.NODE_ENV === "development") {
         console.error("[ExecutionService] Error:", {
           name: error.name,
           message: error.message,
+          testCase: index + 1,
         });
       }
-
-      if (error.name === "AbortError") {
-        throw new Error("Secure Code Engine timed out.");
-      }
-
-      throw error;
+      return failedCase(
+        testCase,
+        index,
+        error.name === "AbortError"
+          ? "Secure Code Engine request timed out."
+          : `Secure Code Engine request failed: ${error.message}`,
+      );
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
+  async warmUp() {
+    if (warmUpPromise) return warmUpPromise;
+    if (Date.now() - lastWarmUpAt < WARM_UP_COOLDOWN_MS) {
+      return { skipped: true };
+    }
+
+    lastWarmUpAt = Date.now();
+    warmUpPromise = (async () => {
+      const { composeProgram } = await import("./wrapperGenerator.js");
+      const program = composeProgram(
+        {
+          signature: {
+            name: "warmUp",
+            returnType: "int",
+            params: [],
+          },
+        },
+        "class Solution { public int warmUp() { return 1; } }",
+        "java",
+      );
+      const result = await this.execute(
+        program,
+        [{ input: "", expectedOutput: "1" }],
+        "java",
+        { timeLimit: 2000, memoryLimit: 65536 },
+      );
+      if (!result.accepted) {
+        throw new Error(result.error || `Judge warm-up returned ${result.status}.`);
+      }
+      return { skipped: false };
+    })();
+
+    try {
+      return await warmUpPromise;
+    } catch (error) {
+      lastWarmUpAt = Date.now() - WARM_UP_COOLDOWN_MS + 60_000;
+      throw error;
+    } finally {
+      warmUpPromise = null;
     }
   }
 }

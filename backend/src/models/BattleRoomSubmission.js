@@ -16,7 +16,8 @@ const questionResultSchema = new mongoose.Schema(
     },
     language: {
       type: String,
-      default: "javascript",
+      default: "java",
+      enum: ["java"],
     },
     status: {
       type: String,
@@ -73,11 +74,12 @@ const questionResultSchema = new mongoose.Schema(
     },
     results: [
       {
+        testCaseId: { type: String },
         testCase: { type: Number },
         status: {
           type: String,
           enum: [
-            "PASSED",
+            "PASSED", "ACCEPTED",
             "FAILED",
             "ERROR",
             "PENDING",
@@ -92,8 +94,10 @@ const questionResultSchema = new mongoose.Schema(
         },
         executionTime: { type: Number, default: 0 },
         memoryUsed: { type: Number, default: 0 },
+        input: { type: String, default: "" },
         output: { type: String, default: "" },
         expectedOutput: { type: String, default: "" },
+        error: { type: String, default: "" },
         isHidden: { type: Boolean, default: false },
         _id: false,
       },
@@ -115,6 +119,7 @@ const battleRoomSubmissionSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+    participantEmail: { type: String, trim: true, lowercase: true, default: "" },
     participantName: { type: String, default: "Participant", trim: true },
     participantOrganization: { type: String, default: "Unspecified", trim: true },
     questionResults: [questionResultSchema],
@@ -139,6 +144,17 @@ const battleRoomSubmissionSchema = new mongoose.Schema(
       enum: ["PENDING", "PROCESSING", "COMPLETED", "DISQUALIFIED"],
       default: "PENDING",
     },
+    resultDelivery: {
+      status: {
+        type: String,
+        enum: ["PENDING", "SENDING", "SENT", "FAILED", "SKIPPED"],
+        default: "PENDING",
+      },
+      attempts: { type: Number, default: 0 },
+      attemptedAt: { type: Date, default: null },
+      sentAt: { type: Date, default: null },
+      error: { type: String, default: "" },
+    },
     disqualifyReason: {
       type: String,
       default: null,
@@ -161,7 +177,6 @@ const battleRoomSubmissionSchema = new mongoose.Schema(
       totalEdits: { type: Number, default: 0 },
       timePerQuestion: { type: Number, default: 0 }, // avg seconds per question
       editFrequency: { type: Number, default: 0 }, // edits per minute
-      languagesUsed: [{ type: String }],
       completedEarly: { type: Boolean, default: false },
     },
   },

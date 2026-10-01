@@ -3,8 +3,7 @@
  * ------------------------------------------------------------------
  * Expected-output auto-generation.
  *
- * The admin uploads ONE correct reference solution (in any supported
- * language). The backend:
+ * The admin uploads ONE correct Java reference solution. The backend:
  *   1. Composes a judge wrapper around it using the same templates
  *      participants will get.
  *   2. Executes it against ALL visible + hidden test-case inputs in a
@@ -21,8 +20,8 @@ import { composeProgram } from "./wrapperGenerator.js";
 import { executionService } from "./executionService.js";
 
 /**
- * Build one composed program per (referenceLanguage) that reads a single
- * test-case input from stdin and prints the result.
+ * Build the composed Java program that reads one test-case input and prints
+ * the result.
  */
 export function buildReferenceProgram(question, referenceSolution, language) {
   return composeProgram(question, referenceSolution, language, { forReferenceSolution: true });
@@ -45,12 +44,6 @@ export async function generateExpectedOutputs(question, referenceSolution, langu
     input: tc.input || "",
     expectedOutput: "__REFERENCE_OUTPUT_SENTINEL__",
   }));
-console.log("======================================");
-console.log("PROGRAM LENGTH:", program.length);
-console.log("LANGUAGE:", language);
-console.log("TEST CASES:", batchTestCases.length);
-console.log("======================================");
-console.log(program.substring(0, 1000));
   const result = await executionService.execute(program, batchTestCases, language, {
     isFullProgram: true,
     forReferenceSolution: true,

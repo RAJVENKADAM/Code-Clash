@@ -44,15 +44,6 @@ const simpleJava = `public class Main {
   }
 }`;
 
-const simplePy = `print(42)`;
-
-const simpleCpp = `#include <iostream>
-using namespace std;
-int main(){ cout << "hi" << endl; return 0; }`;
-
-const simpleC = `#include <stdio.h>
-int main(){ printf("hi\\n"); return 0; }`;
-
 const composedJava = `import java.util.*; import java.io.*;
 public class Main {
     private static BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
@@ -87,25 +78,7 @@ async function main() {
     testCases: [{ input: "", expectedOutput: "hello" }],
   });
 
-  // 2. Simple PYTHON
-  await probe("PYTHON simple", {
-    language: "PYTHON", code: simplePy, timeLimit: 2000, memoryLimit: 65536,
-    testCases: [{ input: "", expectedOutput: "42" }],
-  });
-
-  // 3. Simple C++
-  await probe("CPP simple", {
-    language: "CPP", code: simpleCpp, timeLimit: 2000, memoryLimit: 65536,
-    testCases: [{ input: "", expectedOutput: "hi" }],
-  });
-
-  // 4. Simple C
-  await probe("C simple", {
-    language: "C", code: simpleC, timeLimit: 2000, memoryLimit: 65536,
-    testCases: [{ input: "", expectedOutput: "hi" }],
-  });
-
-  // 5. Composed JAVA (reads stdin)
+  // 2. Composed JAVA (reads stdin)
   await probe("JAVA composed (reads stdin)", {
     language: "JAVA", code: composedJava, timeLimit: 2000, memoryLimit: 65536,
     testCases: tcs,

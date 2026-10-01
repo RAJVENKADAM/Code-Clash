@@ -9,7 +9,7 @@ import { sendOtpEmail, sanitizeEmail } from "./emailDispatchService.js";
  * Registration flow:
  *   1. User provides name, email, password.
  *   2. An OTP is emailed for verification.
- *   3. On OTP verification the account is created (password bcrypt-hashed).
+ *   3. On OTP verification the pending account is marked verified.
  *
  * Login flow:
  *   User provides email + password. On success a login token + session is issued.
@@ -42,12 +42,6 @@ function toSentenceCase(name) {
     .join(" ");
 }
 
-function normalizeOrganization(org) {
-  return String(org || "")
-    .trim()
-    .toLowerCase();
-}
-
 // ---- Lightweight in-memory per-IP cooldown (defense in depth) -------------
 const cooldownMap = new Map(); // ip -> timestamp (ms)
 function isRateLimited(ip) {
@@ -68,13 +62,24 @@ function isRateLimited(ip) {
  * The user document is created immediately with the hashed password but
  * `isVerified` is false until the OTP is confirmed.
  *
- * If the email already exists, the flow is reused for login OTP verification.
+ * Existing verified accounts must use password login; OTP is only for
+ * completing registration and verifying the email address.
  */
-export async function requestOtp({ email, organization, name, password, ip }) {
+export async function requestOtp({ email, name, password, ip }) {
   const cleanEmail = sanitizeEmail(email);
   if (!cleanEmail) throw new Error("Invalid email format.");
 
-  const org = normalizeOrganization(organization);
+  const displayName = toSentenceCase(name);
+  if (displayName.length < 2 || displayName.length > 100) {
+    throw new Error("Full name must be between 2 and 100 characters.");
+  }
+  if (
+    typeof password !== "string" ||
+    password.length < 8 ||
+    Buffer.byteLength(password, "utf8") > 72
+  ) {
+    throw new Error("Password must be between 8 and 72 bytes.");
+  }
 
   if (ip && isRateLimited(ip)) {
     throw new Error(
@@ -85,28 +90,26 @@ export async function requestOtp({ email, organization, name, password, ip }) {
   let user = await User.findOne({ email: cleanEmail });
 
   if (!user) {
-    // New registration — a password is mandatory.
-    if (!password || String(password).length < 8) {
-      throw new Error("Password must be at least 8 characters.");
-    }
-    const displayName = name ? toSentenceCase(name) : cleanEmail.split("@")[0];
     const isSuperAdmin = cleanEmail === SUPER_ADMIN_EMAIL;
     user = new User({
       email: cleanEmail,
       name: displayName,
-      organization: org || "Unspecified",
+      organization: "Unspecified",
       password, // hashed via pre-save hook
       role: isSuperAdmin ? "ADMIN" : "USER",
       isVerified: false,
     });
     await user.save();
   } else {
-    // Existing user — never overwrite the (already-hashed) password here.
-    // Password changes are handled by the dedicated login flow.
+    if (user.isVerified) {
+      throw new Error("Email is already registered. Sign in with your password.");
+    }
+    // A pending registration may request another code, but cannot replace
+    // the password or profile details already attached to that account.
   }
 
   // Guarantee a single live code per user.
-  await Otp.deleteMany({ email: cleanEmail });
+  await Otp.deleteMany({ email: cleanEmail, purpose: "register" });
 
   const code = Otp.generateCode();
   const codeHash = Otp.hashCode(code);
@@ -114,7 +117,8 @@ export async function requestOtp({ email, organization, name, password, ip }) {
   const otpDoc = new Otp({
     codeHash,
     email: cleanEmail,
-    organization: org,
+    organization: "",
+    purpose: "register",
     userId: user._id,
     attempts: 0,
     ip: ip || "",
@@ -127,7 +131,6 @@ export async function requestOtp({ email, organization, name, password, ip }) {
     email: cleanEmail,
     otp: code,
     ttlMinutes,
-    organization: org,
   });
 
   if (!sendResult.success) {
@@ -141,10 +144,91 @@ export async function requestOtp({ email, organization, name, password, ip }) {
   return { userId: user._id.toString(), email: cleanEmail };
 }
 
+export async function requestPasswordReset({ email }) {
+  const cleanEmail = sanitizeEmail(email);
+  if (!cleanEmail) throw new Error("Invalid email format.");
+
+  const user = await User.findOne({ email: cleanEmail });
+  if (!user?.isVerified) return;
+
+  await Otp.deleteMany({ email: cleanEmail, purpose: "password-reset" });
+
+  const code = Otp.generateCode();
+  const otpDoc = new Otp({
+    codeHash: Otp.hashCode(code),
+    email: cleanEmail,
+    organization: "",
+    purpose: "password-reset",
+    userId: user._id,
+    attempts: 0,
+  });
+  await otpDoc.save();
+
+  const ttlMinutes = Math.max(1, Math.round(OTP_TTL_SECONDS / 60));
+  const sendResult = await sendOtpEmail({
+    email: cleanEmail,
+    otp: code,
+    ttlMinutes,
+    purpose: "password-reset",
+  });
+
+  if (!sendResult.success) {
+    await Otp.deleteOne({ _id: otpDoc._id }).catch(() => {});
+    console.error(
+      `[AuthService] Password reset email dispatch failed for ${cleanEmail}; OTP rolled back.`,
+    );
+    throw new Error("Unable to send a password reset code at this time.");
+  }
+}
+
+export async function resetPassword({ email, otp, password }) {
+  const cleanEmail = sanitizeEmail(email);
+  if (!cleanEmail) throw new Error("Invalid email format.");
+  if (!/^\d{6}$/.test(String(otp || ""))) {
+    throw new Error("Invalid or expired password reset code.");
+  }
+  if (
+    typeof password !== "string" ||
+    password.length < 8 ||
+    Buffer.byteLength(password, "utf8") > 72
+  ) {
+    throw new Error("Password must be between 8 and 72 bytes.");
+  }
+
+  const user = await User.findOne({ email: cleanEmail }).select("+password");
+  if (!user?.isVerified) {
+    throw new Error("Invalid or expired password reset code.");
+  }
+
+  const otpDoc = await Otp.findOne({
+    email: cleanEmail,
+    userId: user._id,
+    purpose: "password-reset",
+  }).sort({ createdAt: -1 });
+  if (!otpDoc) {
+    throw new Error("Invalid or expired password reset code.");
+  }
+
+  if (!otpDoc.matches(String(otp))) {
+    otpDoc.attempts = (otpDoc.attempts || 0) + 1;
+    if (otpDoc.attempts >= OTP_MAX_ATTEMPTS) {
+      await Otp.deleteOne({ _id: otpDoc._id });
+      throw new Error("Too many invalid attempts. Request a new reset code.");
+    }
+    await otpDoc.save();
+    throw new Error("Invalid or expired password reset code.");
+  }
+
+  user.password = password;
+  await user.save();
+  await Otp.deleteOne({ _id: otpDoc._id });
+  return user;
+}
+
 /**
  * Verify an OTP and mark the user as verified.
  */
-export async function verifyOtp({ userId, organization, otp }) {
+export async function verifyOtp({ userId, otp }) {
   if (!/^\d{6}$/.test(String(otp || ""))) {
     throw new Error("Invalid OTP.");
   }
@@ -155,11 +239,14 @@ export async function verifyOtp({ userId, organization, otp }) {
   const user = await User.findById(userId);
   if (!user) throw new Error("User not found.");
 
-  const org = normalizeOrganization(organization);
+  if (user.isVerified) {
+    throw new Error("This account is already verified. Sign in with your password.");
+  }
 
   const otpDoc = await Otp.findOne({
     email: user.email,
-    organization: org,
+    userId: user._id,
+    purpose: "register",
   }).sort({ createdAt: -1 });
 
   if (!otpDoc) {
@@ -180,7 +267,6 @@ export async function verifyOtp({ userId, organization, otp }) {
   // SUCCESS: delete the OTP so it can never be reused.
   await Otp.deleteOne({ _id: otpDoc._id });
 
-  user.organization = org || user.organization || "Unspecified";
   user.isVerified = true;
 
   // Promote super admin if the email matches.
@@ -199,6 +285,9 @@ export async function verifyOtp({ userId, organization, otp }) {
 export async function loginWithPassword({ email, password }) {
   const cleanEmail = sanitizeEmail(email);
   if (!cleanEmail) throw new Error("Invalid email format.");
+  if (typeof password !== "string" || password.length === 0) {
+    throw new Error("Email and password are required.");
+  }
 
   const user = await User.findOne({ email: cleanEmail }).select("+password");
   if (!user) {
@@ -227,7 +316,7 @@ export async function loginWithPassword({ email, password }) {
 /**
  * Backward-compatible resend handler.
  */
-export async function resendOtp({ email, organization, userId, ip }) {
+export async function resendOtp({ email, userId, ip }) {
   let targetEmail = email;
   if (!targetEmail && userId) {
     const found = await User.findById(userId);
@@ -239,9 +328,12 @@ export async function resendOtp({ email, organization, userId, ip }) {
   // Reuse the existing user's password so the OTP can be re-sent without the
   // user having to re-enter it (password is required for the request flow).
   const found = await User.findOne({ email: targetEmail }).select("+password");
+  if (found?.isVerified) {
+    throw new Error("This account is already verified. Sign in with your password.");
+  }
   const name = found?.name || "";
   const password = found?.password || "";
-  return requestOtp({ email: targetEmail, organization, name, password, ip });
+  return requestOtp({ email: targetEmail, name, password, ip });
 }
 
 export default {
@@ -249,4 +341,6 @@ export default {
   verifyOtp,
   loginWithPassword,
   resendOtp,
+  requestPasswordReset,
+  resetPassword,
 };

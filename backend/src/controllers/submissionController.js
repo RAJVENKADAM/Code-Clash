@@ -6,6 +6,7 @@ import {
 } from "../services/submissionService.js";
 import Challenge from "../models/Challenge.js";
 import Submission from "../models/Submission.js";
+import { getChallengeTestCaseGroups } from "../services/challengeTestCases.js";
 
 export async function submitSolution(req, res) {
   try {
@@ -47,7 +48,11 @@ export async function submitSolution(req, res) {
       });
     }
 
-    const submission = await createSubmission(userId, challengeId, code, language || "javascript", timeToSolve || 0);
+    if (language && language.toLowerCase() !== "java") {
+      return res.status(400).json({ error: "Only Java submissions are supported." });
+    }
+
+    const submission = await createSubmission(userId, challengeId, code, "java", timeToSolve || 0);
 
     // Audit log
     Submission.findById(submission._id).then((s) => {
@@ -58,7 +63,7 @@ export async function submitSolution(req, res) {
             action: "SUBMISSION_CREATE",
             resource: "submission",
             resourceId: submission._id,
-            details: { challengeId, language: language || "javascript" },
+            details: { challengeId, language: "java" },
             requestId: req.requestId,
           }).catch(() => {});
         });
@@ -92,17 +97,26 @@ export async function getSubmissionResult(req, res) {
       return res.status(404).json({ error: "No submission found for this challenge." });
     }
 
-    // Only return public-safe data (no hidden test case details)
-    const publicResult = submission.toPublicJSON();
-    // Never expose expected outputs or hidden test data
-    if (publicResult.results) {
-      publicResult.results = publicResult.results.map((r) => ({
-        testCase: r.testCase,
-        status: r.status,
-        executionTime: r.executionTime,
-        memoryUsed: r.memoryUsed,
-      }));
-    }
+    const challenge = await Challenge.findById(challengeId).select(
+      "visibleTestCases testCases",
+    );
+    const { visible, hidden } = getChallengeTestCaseGroups(challenge);
+    const visibleCount = visible.length;
+    const publicResult = submission.toPublicJSON({
+      includeTestCaseDetails: true,
+    });
+    if (hidden.length > 0) publicResult.output = "";
+    publicResult.results = publicResult.results.map((result, index) =>
+      index < visibleCount
+        ? { ...result, isHidden: false }
+        : {
+            testCase: result.testCase,
+            status: result.status,
+            executionTime: result.executionTime,
+            memoryUsed: result.memoryUsed,
+            isHidden: true,
+          },
+    );
 
     return res.status(200).json(publicResult);
   } catch (error) {
@@ -120,16 +134,9 @@ export async function updateSubmissionResult(req, res) {
       return res.status(400).json({ error: "Execution result is required." });
     }
 
-    // Only allow judge engine to update results (internal endpoint)
-    // Verify the submission belongs to the authenticated user
     const submission = await Submission.findById(submissionId);
     if (!submission) {
       return res.status(404).json({ error: "Submission not found." });
-    }
-
-    // Strict validation: only admin or the judge service can update results
-    if (req.user && req.user.role !== "ADMIN" && req.userId !== submission.userId.toString()) {
-      return res.status(403).json({ error: "Access denied. You can only update your own submissions." });
     }
 
     // Validate execution result structure
@@ -215,4 +222,3 @@ export async function getSubmissionHistory(req, res) {
     return res.status(500).json({ error: "Failed to get submission history." });
   }
 }
-

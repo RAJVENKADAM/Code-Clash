@@ -137,9 +137,13 @@ challengeSchema.methods.toAdminJSON = function () {
     functionSignatures: toPlainObjectMap(this.functionSignatures),
     starterCodes: toPlainObjectMap(this.starterCodes),
     referenceSolutions: toPlainObjectMap(this.referenceSolutions),
-    visibleTestCases: this.visibleTestCases || this.testCases || [],
+    visibleTestCases: this.visibleTestCases?.length
+      ? this.visibleTestCases
+      : this.testCases || [],
     hiddenTestCases: this.hiddenTestCases || [],
-    testCases: this.testCases || this.visibleTestCases || [],
+    testCases: this.testCases?.length
+      ? this.testCases
+      : this.visibleTestCases || [],
     activeDate: this.activeDate,
     isActive: this.isActive,
     totalSubmissions: this.totalSubmissions,
@@ -161,8 +165,11 @@ challengeSchema.methods.toUserJSON = function () {
     functionSignatures: toPlainObjectMap(this.functionSignatures),
     starterCodes: toPlainObjectMap(this.starterCodes),
     referenceSolutions: toPlainObjectMap(this.referenceSolutions),
-    visibleTestCases: this.visibleTestCases || this.testCases || [],
-    hiddenTestCases: this.hiddenTestCases || [],
+    visibleTestCases: (
+      this.visibleTestCases?.length
+        ? this.visibleTestCases
+        : this.testCases || []
+    ).filter((testCase) => !testCase.isHidden),
     activeDate: this.activeDate,
     totalSubmissions: this.totalSubmissions,
     totalAccepted: this.totalAccepted,

@@ -45,8 +45,6 @@ const testCases = [
   { input: "[10,20]", expectedOutput: "2" },
 ];
 
-const languages = ["java", "python", "cpp", "c"];
-
 async function runTest(lang, code, tcs) {
   console.log(`\n========== TEST: ${lang.toUpperCase()} ==========`);
   console.log("STEP 1: Before payload generation");
@@ -93,9 +91,6 @@ async function runTest(lang, code, tcs) {
 async function main() {
   // Test with the actual composed java program
   await runTest("java", javaProgram, testCases);
-
-  // Test small python
-  await runTest("python", "print(42)", [{ input: "", expectedOutput: "42" }]);
 
   // Test a LARGE payload (simulate a real full program ~50KB)
   const bigProgram = "class Solution { public int solution(int[] n) { return 1; } }";

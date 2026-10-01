@@ -20,9 +20,7 @@
  *   2. Normalizes it to the canonical signature consumed by the wrapper
  *      generator and language templates:
  *        { name, returnType, params: [{name, type}] }
- *   3. Generates the language-specific signature string for Java, Python,
- *      C++ and C (C uses deriveCSignature so array sizes / matrix
- *      dimensions / returnSize are included exactly as the wrapper calls).
+ *   3. Generates the Java method signature used by the judge wrapper.
  *
  * The canonical `signature` object remains the single source of truth in
  * the database and is 100% compatible with:
@@ -32,7 +30,7 @@
  *   - referenceSolutionService.generateExpectedOutputs
  */
 
-import { mapType, deriveCSignature } from "./languageTemplates.js";
+import { mapType } from "./languageTemplates.js";
 
 // Canonical return types supported by the parameter-based builder.
 const PRIMITIVE_TYPES = ["int", "long", "double", "float", "boolean", "char", "string", "void"];
@@ -161,74 +159,14 @@ export function normalizeStructuredSignature(input) {
  */
 export function generateJavaSignature(signature) {
   const name = signature?.name || "solution";
-  const ret = mapType(signature?.returnType || "void", "java");
-  const params = (signature?.params || []).map((p) => `${mapType(p.type, "java")} ${p.name}`).join(", ");
+  const ret = mapType(signature?.returnType || "void");
+  const params = (signature?.params || []).map((p) => `${mapType(p.type)} ${p.name}`).join(", ");
   return `public ${ret} ${name}(${params})`;
 }
 
-/**
- * Generate a Python signature string:
- *   def twoSum(self, nums: List[int], target: int) -> List[int]:
- */
-export function generatePythonSignature(signature) {
-  const name = signature?.name || "solution";
-  const params = (signature?.params || []).map((p) => `${p.name}: ${mapType(p.type, "python")}`).join(", ");
-  const ret = signature?.returnType === "void" || !signature?.returnType ? "None" : mapType(signature.returnType, "python");
-  const prefix = params ? `self, ${params}` : "self";
-  return `def ${name}(${prefix}) -> ${ret}:`;
-}
-
-/**
- * Generate a C++ signature string:
- *   vector<int> twoSum(vector<int>& nums, int target)
- */
-export function generateCppSignature(signature) {
-  const name = signature?.name || "solution";
-  const params = (signature?.params || []).map((p) => {
-    const type = p.type || "int";
-    const canon = (type || "").toLowerCase().trim();
-    const mapped = mapType(type, "cpp");
-    // Match starter-code conventions: vectors by reference, pointers for structures.
-    if (canon.startsWith("list<") || canon.endsWith("[]")) return `${mapped}& ${p.name}`;
-    if (canon === "listnode" || canon === "treenode") return `${mapped} ${p.name}`;
-    return `${mapped} ${p.name}`;
-  }).join(", ");
-  return `${mapType(signature?.returnType || "void", "cpp")} ${name}(${params})`;
-}
-
-/**
- * Generate a C signature string using deriveCSignature so array/matrix
- * parameters include their size arguments and array returns include
- * returnSize exactly as the judge wrapper invokes the function:
- *
- *   int* twoSum(int* nums, int numsSize, int target, int* returnSize)
- */
-export function generateCSignature(signature) {
-  const name = signature?.name || "solution";
-  const c = deriveCSignature(signature);
-  const params = c.cParams ? c.cParams.join(", ") : [];
-  let retType = mapType(signature?.returnType || "void", "c");
-  const ret = (signature?.returnType || "void").toLowerCase().trim();
-  let callParams = params;
-  if (ret.endsWith("[]") && !ret.endsWith("[][]")) {
-    callParams = params ? `${params}, int* returnSize` : "int* returnSize";
-  }
-  return `${retType} ${name}(${callParams})`;
-}
-
-/**
- * Generate signature preview strings for all four supported languages.
- * @param {Object} signature - canonical { name, returnType, params }
- * @returns {{java: string, python: string, cpp: string, c: string}}
- */
 export function generateSignaturePreviews(signature) {
   if (!signature || !signature.name) return {};
-  return {
-    java: generateJavaSignature(signature),
-    python: generatePythonSignature(signature),
-    cpp: generateCppSignature(signature),
-    c: generateCSignature(signature),
-  };
+  return { java: generateJavaSignature(signature) };
 }
 
 export default {
@@ -239,8 +177,4 @@ export default {
   normalizeStructuredSignature,
   generateSignaturePreviews,
   generateJavaSignature,
-  generatePythonSignature,
-  generateCppSignature,
-  generateCSignature,
 };
-

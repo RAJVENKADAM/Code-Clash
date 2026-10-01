@@ -96,18 +96,45 @@ export function compareOutput(actual, expected) {
   }
 
   // Structural comparison for JSON-parseable content
+  let parsedA;
+  let parsedE;
+  let actualIsJson = false;
+  let expectedIsJson = false;
   try {
-    const parsedA = JSON.parse(aStr);
-    const parsedE = JSON.parse(eStr);
-    if (deepEquals(parsedA, parsedE)) {
-      return {
-        passed: true,
-        normalizedExpected: normalizeText(eStr),
-        normalizedActual: normalizeText(aStr),
-      };
-    }
+    parsedA = JSON.parse(aStr);
+    actualIsJson = true;
   } catch (e) {
     // Fall through to line-aware comparison
+  }
+  try {
+    parsedE = JSON.parse(eStr);
+    expectedIsJson = true;
+  } catch (e) {
+    // Fall through to line-aware comparison
+  }
+
+  if (actualIsJson && expectedIsJson && deepEquals(parsedA, parsedE)) {
+    return {
+      passed: true,
+      normalizedExpected: normalizeText(eStr),
+      normalizedActual: normalizeText(aStr),
+    };
+  }
+
+  const comparableA =
+    actualIsJson && typeof parsedA === "string" ? parsedA : aStr;
+  const comparableE =
+    expectedIsJson && typeof parsedE === "string" ? parsedE : eStr;
+  if (
+    ((actualIsJson && typeof parsedA === "string") ||
+      (expectedIsJson && typeof parsedE === "string")) &&
+    normalizeText(comparableA) === normalizeText(comparableE)
+  ) {
+    return {
+      passed: true,
+      normalizedExpected: normalizeText(eStr),
+      normalizedActual: normalizeText(aStr),
+    };
   }
 
   // Line-by-line comparison ignoring trailing whitespace per line
@@ -151,4 +178,3 @@ export default {
   compareOutput,
   EPSILON,
 };
-
